@@ -39,6 +39,8 @@ passwords, full URLs or page content.
 - **Browser side panel** (Chrome, Edge, Brave; Firefox sidebar) with the widgets you choose. Your own new tab
   page stays untouched.
 - **Insights** in plain language: biggest changes this week, busiest hours, focus streaks.
+- **Focus music** (rain, ocean, noise — generated, no downloads) and a **pop-up timer** while you focus.
+- **Administrator mode** to block games that run as administrator, such as Genshin Impact.
 
 ## Install
 
