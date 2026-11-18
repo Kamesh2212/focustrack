@@ -20,7 +20,7 @@ use crate::platform::{self, ForegroundApp};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,8 @@ const FLUSH_EVERY_TICKS: u64 = 5;
 /// A forward jump in wall-clock time larger than this between two polls means
 /// the machine was suspended (sleep / hibernate) or the clock changed.
 const SUSPEND_GAP_SECS: i64 = 20;
+/// Start checking audio/controller activity after this much keyboard/mouse silence.
+const MEDIA_CHECK_AFTER_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +107,12 @@ impl Shared {
 /// What the tracker needs from the OS. Swapped for a fake in tests.
 pub trait Probe {
     fn foreground(&mut self) -> Option<ForegroundApp>;
+    /// Seconds since the last keyboard/mouse input.
     fn idle_seconds(&mut self) -> u64;
+    /// Seconds since the last game-controller input (`u64::MAX` if none).
+    fn controller_idle_seconds(&mut self) -> u64;
+    /// Lower-case exe names of apps playing sound right now.
+    fn audible_exes(&mut self) -> HashSet<String>;
     fn locked(&mut self) -> bool;
     fn describe(&mut self, exe_path: &str) -> Option<String>;
 }
@@ -118,6 +125,12 @@ impl Probe for WindowsProbe {
     }
     fn idle_seconds(&mut self) -> u64 {
         platform::idle_seconds()
+    }
+    fn controller_idle_seconds(&mut self) -> u64 {
+        platform::controller_idle_seconds()
+    }
+    fn audible_exes(&mut self) -> HashSet<String> {
+        platform::audible_exes()
     }
     fn locked(&mut self) -> bool {
         platform::is_session_locked()
@@ -193,6 +206,8 @@ pub struct Tracker<P: Probe> {
     idle: Option<Span>,
     site: Option<SiteSpan>,
     apps: HashMap<String, (i64, String)>,
+    /// When each app (lower-case exe) was last heard playing sound.
+    last_audible: HashMap<String, NaiveDateTime>,
     sites: HashMap<String, i64>,
     last_tick: NaiveDateTime,
     ticks: u64,
@@ -208,6 +223,7 @@ impl<P: Probe> Tracker<P> {
             idle: None,
             site: None,
             apps: HashMap::new(),
+            last_audible: HashMap::new(),
             sites: HashMap::new(),
             last_tick: start,
             ticks: 0,
@@ -253,7 +269,7 @@ impl<P: Probe> Tracker<P> {
             return;
         }
 
-        let idle_secs = self.probe.idle_seconds();
+        let idle_secs = self.effective_idle(fg.as_ref(), now);
         let threshold = self.shared.idle_threshold_secs.load(Ordering::SeqCst);
         let last_input = (now - Duration::seconds(idle_secs as i64)).max(midnight(now));
 
@@ -336,6 +352,30 @@ impl<P: Probe> Tracker<P> {
             }
         }
         self.maybe_flush();
+    }
+
+    /// Seconds without "activity": keyboard/mouse input, game-controller input,
+    /// or the foreground app playing sound (watching a video, playing a game).
+    /// The extra checks only run once keyboard/mouse have been quiet for a while.
+    fn effective_idle(&mut self, fg: Option<&ForegroundApp>, now: NaiveDateTime) -> u64 {
+        let input = self.probe.idle_seconds();
+        if input < MEDIA_CHECK_AFTER_SECS {
+            return input;
+        }
+        let controller = self.probe.controller_idle_seconds();
+        let media = match fg {
+            Some(app) => {
+                let exe = app.exe_name.to_ascii_lowercase();
+                if self.probe.audible_exes().contains(&exe) {
+                    self.last_audible.insert(exe.clone(), now);
+                }
+                self.last_audible
+                    .get(&exe)
+                    .map_or(u64::MAX, |t| (now - *t).num_seconds().max(0) as u64)
+            }
+            None => u64::MAX,
+        };
+        input.min(controller).min(media)
     }
 
     pub fn close_all(&mut self, end: NaiveDateTime) {
@@ -583,11 +623,24 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    #[derive(Default)]
     struct Fake {
         app: Option<&'static str>,
         idle: u64,
+        controller_idle: u64,
+        audible: Vec<&'static str>,
         locked: bool,
+    }
+
+    impl Default for Fake {
+        fn default() -> Self {
+            Fake {
+                app: None,
+                idle: 0,
+                controller_idle: u64::MAX,
+                audible: Vec::new(),
+                locked: false,
+            }
+        }
     }
 
     impl Probe for Fake {
@@ -599,6 +652,12 @@ mod tests {
         }
         fn idle_seconds(&mut self) -> u64 {
             self.idle
+        }
+        fn controller_idle_seconds(&mut self) -> u64 {
+            self.controller_idle
+        }
+        fn audible_exes(&mut self) -> HashSet<String> {
+            self.audible.iter().map(|s| s.to_string()).collect()
         }
         fn locked(&mut self) -> bool {
             self.locked
@@ -823,6 +882,100 @@ mod tests {
         // Last input at 09:02:00; the idle threshold is reached at 09:07:00
         // and website time is trimmed back to the last input.
         assert_eq!(sites(&t)[0].2, 120);
+    }
+
+    /// Runs `from..=to`, with keyboard/mouse quiet since `quiet_from`; `audible`
+    /// decides each second whether the foreground app is playing sound.
+    fn run_quiet(
+        t: &mut Tracker<Fake>,
+        from: NaiveDateTime,
+        to: NaiveDateTime,
+        quiet_from: NaiveDateTime,
+        audible: impl Fn(NaiveDateTime) -> bool,
+    ) {
+        let mut cur = from;
+        while cur <= to {
+            t.probe.idle = (cur - quiet_from).num_seconds().max(0) as u64;
+            let app = t.probe.app.unwrap_or("");
+            t.probe.audible = if audible(cur) { vec![app] } else { vec![] };
+            report(t, "edge", Some("netflix.com"), cur);
+            t.tick(cur);
+            cur += Duration::seconds(1);
+        }
+    }
+
+    #[test]
+    fn watching_a_video_counts_as_active() {
+        // #1: a 30-minute video with no keyboard/mouse input is all active time.
+        let mut t = setup(at(18, 20, 0, 0));
+        t.probe.app = Some("msedge.exe");
+        run_quiet(
+            &mut t,
+            at(18, 20, 0, 0),
+            at(18, 20, 30, 0),
+            at(18, 20, 0, 0),
+            |_| true,
+        );
+        t.close_all(at(18, 20, 30, 0));
+        assert_eq!(usage(&t)[0].2, 30 * 60);
+        assert_eq!(sites(&t)[0].2, 30 * 60);
+        assert_eq!(idle_total(&t), 0);
+    }
+
+    #[test]
+    fn quiet_scenes_dont_end_a_video_but_stopping_does() {
+        let mut t = setup(at(18, 20, 0, 0));
+        t.probe.app = Some("msedge.exe");
+        // Sound until 20:10 with a 2-minute silent scene at 20:05; then the video ends.
+        let playing = |c: NaiveDateTime| {
+            c < at(18, 20, 10, 0) && !(c >= at(18, 20, 5, 0) && c < at(18, 20, 7, 0))
+        };
+        run_quiet(
+            &mut t,
+            at(18, 20, 0, 0),
+            at(18, 20, 20, 0),
+            at(18, 20, 0, 0),
+            playing,
+        );
+        t.close_all(at(18, 20, 20, 0));
+        // Active until the sound stopped at 20:10 (last heard 20:09:59), idle after.
+        let active: i64 = usage(&t).iter().map(|r| r.2).sum();
+        assert_eq!(active, 10 * 60 - 1);
+        assert_eq!(idle_total(&t), 10 * 60 + 1);
+    }
+
+    #[test]
+    fn background_music_from_another_app_doesnt_count() {
+        let mut t = setup(at(18, 20, 0, 0));
+        t.probe.app = Some("code.exe");
+        let mut cur = at(18, 20, 0, 0);
+        while cur <= at(18, 20, 10, 0) {
+            t.probe.idle = (cur - at(18, 20, 0, 0)).num_seconds() as u64;
+            t.probe.audible = vec!["spotify.exe"];
+            t.tick(cur);
+            cur += Duration::seconds(1);
+        }
+        t.close_all(at(18, 20, 10, 0));
+        let active: i64 = usage(&t).iter().map(|r| r.2).sum();
+        assert_eq!(active, 0, "trimmed back to the last input");
+        assert!(idle_total(&t) > 0);
+    }
+
+    #[test]
+    fn controller_input_counts_as_active() {
+        // #3: playing with a gamepad (keyboard/mouse untouched, no sound).
+        let mut t = setup(at(18, 21, 0, 0));
+        t.probe.app = Some("game.exe");
+        let mut cur = at(18, 21, 0, 0);
+        while cur <= at(18, 21, 20, 0) {
+            t.probe.idle = (cur - at(18, 21, 0, 0)).num_seconds() as u64;
+            t.probe.controller_idle = 2;
+            t.tick(cur);
+            cur += Duration::seconds(1);
+        }
+        t.close_all(at(18, 21, 20, 0));
+        assert_eq!(usage(&t)[0].2, 20 * 60);
+        assert_eq!(idle_total(&t), 0);
     }
 
     #[test]
