@@ -58,6 +58,10 @@ export interface LimitStatus {
   usedSecs: number;
   extraSecs: number;
   overridesUsed: number;
+  /** App limits: exe path ("" if unknown). */
+  path: string;
+  /** Launcher limits: the folder whose programs this limit also covers. */
+  scope: string | null;
 }
 
 export interface BrowserStatus {
@@ -152,6 +156,12 @@ export interface Settings {
   overridesPerDay: number;
   goalReminder: string;
   dashboardLayout: string;
+}
+
+export interface AdminMode {
+  elevated: boolean;
+  enabled: boolean;
+  needsAdmin: string[];
 }
 
 export interface DayKinds {

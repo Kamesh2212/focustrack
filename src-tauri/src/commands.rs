@@ -750,7 +750,8 @@ pub fn override_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
         .map_err(err)?;
     if let Some(k) = key {
         if let Ok(mut b) = state.shared.app_blocks.lock() {
-            b.limit.remove(&k.to_ascii_lowercase());
+            let k = k.to_ascii_lowercase();
+            b.limit.retain(|(t, _)| t.exe != k);
         }
         if let Ok(mut b) = state.shared.blocklist.lock() {
             b.retain(|d| *d != k);
@@ -1118,4 +1119,63 @@ pub fn get_study_time(state: State<'_, AppState>) -> CmdResult<(i64, i64)> {
     }
     let t = crate::goals::category_secs(&conn, &an::fmt_day(today), study).map_err(err)?;
     Ok((t, week))
+}
+
+// ------------------------------------------------------- administrator mode
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminMode {
+    /// FocusTrack is running with administrator rights right now.
+    pub elevated: bool,
+    /// The start-up task is set up.
+    pub enabled: bool,
+    /// Apps FocusTrack tried to close but couldn't (they run as administrator).
+    pub needs_admin: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn get_admin_mode(state: State<'_, AppState>) -> CmdResult<AdminMode> {
+    let enabled = tauri::async_runtime::spawn_blocking(crate::admin::task_installed)
+        .await
+        .map_err(err)?;
+    let mut needs: Vec<String> = state
+        .shared
+        .needs_admin
+        .lock()
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    needs.sort();
+    Ok(AdminMode {
+        elevated: crate::platform::is_elevated(),
+        enabled,
+        needs_admin: needs,
+    })
+}
+
+/// Shows the Windows administrator prompt, sets up the start-up task and
+/// restarts FocusTrack with administrator rights.
+#[tauri::command]
+pub async fn enable_admin_mode(app: AppHandle) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(crate::admin::enable)
+        .await
+        .map_err(err)??;
+    // The task starts FocusTrack at sign-in now; avoid a second, normal start.
+    let _ = app.autolaunch().disable();
+    crate::admin::restart_elevated();
+    crate::quit(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn disable_admin_mode(app: AppHandle) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(crate::admin::disable)
+        .await
+        .map_err(err)??;
+    let _ = app.autolaunch().enable();
+    if crate::platform::is_elevated() {
+        crate::admin::restart_normal();
+        crate::quit(&app);
+    }
+    Ok(())
 }

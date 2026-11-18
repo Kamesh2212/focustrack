@@ -249,6 +249,14 @@ function LimitRow({ l, onEdit, onChange, onError }: { l: LimitStatus; onEdit: ()
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
             {ACTIONS.find((a) => a.value === l.action)?.short}
           </span>
+          {l.scope && (
+            <span
+              className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+              title={`Programs started from ${l.scope} (such as games from this launcher) count toward and are blocked by this limit.`}
+            >
+              includes games in this launcher
+            </span>
+          )}
           {l.extraSecs > 0 && (
             <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:bg-amber-950 dark:text-amber-300">
               +{fmtDuration(l.extraSecs)} today

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Bell, ShieldCheck } from "lucide-react";
+import { Bell, ShieldAlert, ShieldCheck } from "lucide-react";
 import { api, isTauri } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import type { Settings as SettingsT, Theme } from "../lib/types";
@@ -31,6 +31,7 @@ function Row({ title, desc, children }: { title: string; desc?: ReactNode; child
 export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) => void }) {
   const { data, error, reload } = useLoad(() => api.settings(), []);
   const browser = useBrowserStatus();
+  const admin = useLoad(() => api.adminMode(), [], 15000);
   const [retention, setRetention] = useState(90);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -99,6 +100,28 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
               ))}
             </select>
           </Row>
+        </Card>
+
+        <Card title="Administrator mode">
+          <Row
+            title={admin.data?.enabled ? (admin.data.elevated ? "On — FocusTrack is running as administrator" : "On — restart FocusTrack to apply") : "Off"}
+            desc="Some games, like Genshin Impact, run as administrator. Windows doesn't let a normal app close them, so FocusTrack needs administrator rights to block them. Turning this on asks Windows for permission once and starts FocusTrack that way at sign-in."
+          >
+            {admin.data?.enabled ? (
+              <Button onClick={() => run(() => api.disableAdminMode(), "Administrator mode turned off.")}>Turn off</Button>
+            ) : (
+              <Button variant="primary" onClick={() => run(() => api.enableAdminMode())}>
+                <ShieldAlert size={15} /> Turn on
+              </Button>
+            )}
+          </Row>
+          {!!admin.data?.needsAdmin.length && !admin.data.elevated && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+              FocusTrack couldn't close {admin.data.needsAdmin.join(", ")} because{" "}
+              {admin.data.needsAdmin.length === 1 ? "it runs" : "they run"} as administrator. Turn on Administrator mode to block{" "}
+              {admin.data.needsAdmin.length === 1 ? "it" : "them"}.
+            </p>
+          )}
         </Card>
 
         <Card title="Notifications">

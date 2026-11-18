@@ -4,6 +4,7 @@
 // iterator directly keeps the prepared statement borrowed past its lifetime.
 #![allow(clippy::let_and_return)]
 
+mod admin;
 mod analytics;
 mod blocker;
 mod browser;
@@ -12,6 +13,7 @@ mod commands;
 mod db;
 mod focus;
 mod goals;
+mod identity;
 mod insights;
 mod installed;
 mod limits;
@@ -45,7 +47,7 @@ fn show_main(app: &AppHandle) {
 }
 
 /// Lets the tracker close its open session before the process exits.
-fn quit(app: &AppHandle) {
+pub(crate) fn quit(app: &AppHandle) {
     let shared = app.state::<AppState>().shared.clone();
     shared.shutdown.store(true, Ordering::SeqCst);
     for _ in 0..30 {
@@ -121,6 +123,11 @@ pub fn run() {
             Some(vec!["--minimized"]),
         ))
         .setup(|app| {
+            // Administrator mode is on but this copy isn't elevated (e.g. opened
+            // from the Start menu): hand over to the administrator copy.
+            if admin::hand_over_if_needed() {
+                std::process::exit(0);
+            }
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("focustrack.db");
@@ -222,6 +229,9 @@ pub fn run() {
             commands::delete_resource,
             commands::open_url,
             commands::get_study_time,
+            commands::get_admin_mode,
+            commands::enable_admin_mode,
+            commands::disable_admin_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

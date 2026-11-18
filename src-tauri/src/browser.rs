@@ -288,6 +288,20 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 )),
             };
         }
+        // A second FocusTrack start (without administrator rights) asks this
+        // one to show its window. Needs the header like every action.
+        (Method::Post, "/v1/show") => {
+            if header(&req, "X-FocusTrack").is_none() {
+                let _ = req.respond(json_response(
+                    &cors,
+                    403,
+                    r#"{"error":"missing header"}"#.into(),
+                ));
+                return;
+            }
+            shared.show_requested.store(true, Ordering::SeqCst);
+            let _ = req.respond(json_response(&cors, 200, r#"{"ok":true}"#.into()));
+        }
         (Method::Post, "/v1/goals/toggle") | (Method::Post, "/v1/notes") => {
             if header(&req, "X-FocusTrack").is_none() {
                 let _ = req.respond(json_response(

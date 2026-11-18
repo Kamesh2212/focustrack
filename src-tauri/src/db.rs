@@ -171,6 +171,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v4(conn)?;
     }
 
+    if version < 5 {
+        migrate_v5(conn)?;
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last saved.
     conn.execute(
         "UPDATE focus_sessions
@@ -291,6 +295,53 @@ fn migrate_v4(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Schema v5 (#5): apps get an identity key — the exe name, or the full path
+/// for exe names shared by unrelated programs (javaw.exe, launcher.exe…).
+/// SQLite can't drop the old UNIQUE(exe_name), so the table is rebuilt
+/// (the documented 12-step procedure; ids are kept, so sessions stay linked).
+fn migrate_v5(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let result = conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE applications_v5 (
+             id           INTEGER PRIMARY KEY,
+             app_key      TEXT NOT NULL UNIQUE,
+             exe_name     TEXT NOT NULL COLLATE NOCASE,
+             display_name TEXT NOT NULL,
+             exe_path     TEXT,
+             category_id  INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+             first_seen   TEXT NOT NULL
+         );
+         INSERT INTO applications_v5 (id, app_key, exe_name, display_name, exe_path, category_id, first_seen)
+             SELECT id, lower(exe_name), exe_name, display_name, exe_path, category_id, first_seen FROM applications;
+         DROP TABLE applications;
+         ALTER TABLE applications_v5 RENAME TO applications;
+         CREATE INDEX IF NOT EXISTS idx_apps_exe ON applications(exe_name);
+         PRAGMA user_version = 5;
+         COMMIT;",
+    );
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result?;
+    // Generic names are keyed by path from now on.
+    let rows: Vec<(i64, String, Option<String>)> = conn
+        .prepare("SELECT id, exe_name, exe_path FROM applications")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (id, exe, path) in rows {
+        let key = crate::identity::app_key(&exe, path.as_deref().unwrap_or(""));
+        if key != exe.to_ascii_lowercase() {
+            conn.execute(
+                "UPDATE OR IGNORE applications SET app_key = ?1 WHERE id = ?2",
+                params![key, id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- settings
 
 #[derive(Debug, Clone)]
@@ -364,22 +415,45 @@ pub fn get_or_create_app(
     display_name: impl FnOnce() -> String,
     now: NaiveDateTime,
 ) -> rusqlite::Result<(i64, String)> {
-    if let Some(found) = conn
+    let key = crate::identity::app_key(exe_name, exe_path);
+    if let Some((id, name, known_path)) = conn
         .query_row(
-            "SELECT id, display_name FROM applications WHERE exe_name = ?1",
-            params![exe_name],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            "SELECT id, display_name, exe_path FROM applications WHERE app_key = ?1",
+            params![key],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()?
     {
-        return Ok(found);
+        // Remember the path once we learn it (needed for launcher folders).
+        if known_path.as_deref().unwrap_or("").is_empty() && !exe_path.is_empty() {
+            conn.execute(
+                "UPDATE applications SET exe_path = ?1 WHERE id = ?2",
+                params![exe_path, id],
+            )?;
+        }
+        return Ok((id, name));
     }
-    let name = display_name();
-    let category = default_category_for(&exe_name.to_ascii_lowercase());
+    let exe_lower = exe_name.to_ascii_lowercase();
+    let name = if crate::identity::is_generic(&exe_lower) {
+        // "launcher.exe" says nothing; its folder usually does (e.g. "HoYoPlay").
+        crate::identity::folder_name(exe_path).unwrap_or_else(display_name)
+    } else {
+        display_name()
+    };
+    let category = match default_category_for(&exe_lower) {
+        "Other" => crate::identity::category_from_path(exe_path).unwrap_or("Other"),
+        c => c,
+    };
     conn.execute(
-        "INSERT INTO applications (exe_name, display_name, exe_path, category_id, first_seen)
-         VALUES (?1, ?2, ?3, (SELECT id FROM categories WHERE name = ?4), ?5)",
-        params![exe_name, name, exe_path, category, fmt_time(now)],
+        "INSERT INTO applications (app_key, exe_name, display_name, exe_path, category_id, first_seen)
+         VALUES (?1, ?2, ?3, ?4, (SELECT id FROM categories WHERE name = ?5), ?6)",
+        params![key, exe_name, name, exe_path, category, fmt_time(now)],
     )?;
     Ok((conn.last_insert_rowid(), name))
 }
@@ -561,7 +635,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         let profiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
             .unwrap();
@@ -639,5 +713,44 @@ mod tests {
         assert!(!mark_notified(&conn, "limit:1:warn", "2026-11-18").unwrap());
         clear_limit_notifications(&conn, 1).unwrap();
         assert!(mark_notified(&conn, "limit:1:warn", "2026-11-18").unwrap());
+    }
+
+    #[test]
+    fn generic_exes_are_separate_apps_and_games_default_to_gaming() {
+        let conn = open_in_memory().unwrap();
+        let (a, name_a) = get_or_create_app(
+            &conn,
+            "launcher.exe",
+            r"C:\Program Files\HoYoPlay\launcher.exe",
+            || "x".into(),
+            t(9, 0, 0),
+        )
+        .unwrap();
+        let (b, _) = get_or_create_app(
+            &conn,
+            "launcher.exe",
+            r"C:\Games\Other\launcher.exe",
+            || "x".into(),
+            t(9, 0, 0),
+        )
+        .unwrap();
+        assert_ne!(a, b, "two different launcher.exe programs");
+        assert_eq!(name_a, "HoYoPlay");
+        let (g, _) = get_or_create_app(
+            &conn,
+            "GenshinImpact.exe",
+            r"C:\Program Files\HoYoPlay\games\Genshin Impact game\GenshinImpact.exe",
+            || "Genshin Impact".into(),
+            t(9, 0, 0),
+        )
+        .unwrap();
+        let cat: String = conn
+            .query_row(
+                "SELECT c.name FROM applications a JOIN categories c ON c.id = a.category_id WHERE a.id = ?1",
+                params![g],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cat, "Gaming");
     }
 }
