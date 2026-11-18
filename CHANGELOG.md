@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+- Reorder dashboard sections and side-panel widgets by drag and drop instead of one step at a time with
+  arrows. The drag handle also moves an item with the arrow keys.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added
