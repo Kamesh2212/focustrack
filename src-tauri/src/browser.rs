@@ -156,13 +156,71 @@ pub fn normalize_domain(raw: &str) -> Option<String> {
     valid.then_some(d)
 }
 
-fn json_response(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
+/// Browser-extension origins we talk to.
+fn is_extension_origin(o: &str) -> bool {
+    o.starts_with("chrome-extension://")
+        || o.starts_with("moz-extension://")
+        || o.starts_with("extension://")
+}
+
+/// Which `Origin` values may use the API. Absent (non-browser or privileged
+/// extension request) and `null` (Firefox can send an opaque origin for
+/// extension requests) are allowed: every data endpoint also requires the
+/// `X-FocusTrack` header, which forces a CORS preflight that web pages can't
+/// pass because we only answer it for extension origins.
+pub fn origin_allowed(origin: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some(o) => o == "null" || is_extension_origin(o),
+    }
+}
+
+/// The origin to echo in CORS headers: extension origins only, never web pages.
+pub fn cors_origin(origin: Option<&str>) -> Option<String> {
+    origin
+        .filter(|o| is_extension_origin(o))
+        .map(str::to_string)
+}
+
+fn header_line(s: &str) -> Header {
+    s.parse().expect("static header")
+}
+
+fn with_cors<R: std::io::Read>(
+    mut r: Response<R>,
+    cors: &Option<String>,
+    preflight: bool,
+) -> Response<R> {
+    if let Some(o) = cors {
+        r = r.with_header(header_line(&format!("Access-Control-Allow-Origin: {o}")));
+        r = r.with_header(header_line("Vary: Origin"));
+        if preflight {
+            r = r
+                .with_header(header_line(
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+                ))
+                .with_header(header_line(
+                    "Access-Control-Allow-Headers: Content-Type, X-FocusTrack",
+                ))
+                .with_header(header_line("Access-Control-Allow-Private-Network: true"))
+                .with_header(header_line("Access-Control-Max-Age: 600"));
+        }
+    }
+    r
+}
+
+fn json_response(
+    cors: &Option<String>,
+    status: u16,
+    body: String,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let ct: Header = "Content-Type: application/json"
         .parse()
         .expect("static header");
-    Response::from_string(body)
+    let r = Response::from_string(body)
         .with_status_code(status)
-        .with_header(ct)
+        .with_header(ct);
+    with_cors(r, cors, false)
 }
 
 fn header(req: &Request, name: &'static str) -> Option<String> {
@@ -178,11 +236,9 @@ fn now() -> NaiveDateTime {
 }
 
 fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>) {
-    let origin_ok = header(&req, "Origin").is_none_or(|o| {
-        o.starts_with("chrome-extension://")
-            || o.starts_with("moz-extension://")
-            || o.starts_with("extension://")
-    });
+    let origin = header(&req, "Origin");
+    let origin_ok = origin_allowed(origin.as_deref());
+    let cors = cors_origin(origin.as_deref());
     let host_ok = header(&req, "Host")
         .is_some_and(|h| h == format!("127.0.0.1:{PORT}") || h == format!("localhost:{PORT}"));
     #[cfg(debug_assertions)]
@@ -194,7 +250,7 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
         origin_ok && host_ok
     );
     if !origin_ok || !host_ok {
-        let _ = req.respond(json_response(403, r#"{"error":"forbidden"}"#.into()));
+        let _ = req.respond(json_response(&cors, 403, r#"{"error":"forbidden"}"#.into()));
         return;
     }
 
@@ -207,12 +263,16 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 "version": env!("CARGO_PKG_VERSION"),
                 "tracking": shared.website_tracking.load(Ordering::SeqCst),
             });
-            let _ = req.respond(json_response(200, body.to_string()));
+            let _ = req.respond(json_response(&cors, 200, body.to_string()));
         }
         (Method::Get, "/v1/summary") => {
             // Usage data: extension-only (the header forces a CORS preflight for web pages).
             if header(&req, "X-FocusTrack").is_none() {
-                let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
+                let _ = req.respond(json_response(
+                    &cors,
+                    403,
+                    r#"{"error":"missing header"}"#.into(),
+                ));
                 return;
             }
             let body = conn
@@ -220,8 +280,9 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 .and_then(|c| summary(c, shared).map_err(|e| e.to_string()))
                 .and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string()));
             let _ = match body {
-                Ok(b) => req.respond(json_response(200, b)),
+                Ok(b) => req.respond(json_response(&cors, 200, b)),
                 Err(e) => req.respond(json_response(
+                    &cors,
                     500,
                     serde_json::json!({ "error": e }).to_string(),
                 )),
@@ -229,7 +290,11 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
         }
         (Method::Post, "/v1/goals/toggle") | (Method::Post, "/v1/notes") => {
             if header(&req, "X-FocusTrack").is_none() {
-                let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
+                let _ = req.respond(json_response(
+                    &cors,
+                    403,
+                    r#"{"error":"missing header"}"#.into(),
+                ));
                 return;
             }
             let mut body = String::new();
@@ -239,11 +304,12 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 .read_to_string(&mut body)
                 .is_err()
             {
-                let _ = req.respond(json_response(400, r#"{"error":"bad body"}"#.into()));
+                let _ = req.respond(json_response(&cors, 400, r#"{"error":"bad body"}"#.into()));
                 return;
             }
             let Some(conn) = conn else {
                 let _ = req.respond(json_response(
+                    &cors,
                     500,
                     r#"{"error":"database unavailable"}"#.into(),
                 ));
@@ -290,8 +356,9 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 }
             };
             let _ = match result {
-                Ok(v) => req.respond(json_response(200, v.to_string())),
+                Ok(v) => req.respond(json_response(&cors, 200, v.to_string())),
                 Err(e) => req.respond(json_response(
+                    &cors,
                     400,
                     serde_json::json!({ "error": e }).to_string(),
                 )),
@@ -299,7 +366,11 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
         }
         (Method::Post, "/v1/heartbeat") => {
             if header(&req, "X-FocusTrack").is_none() {
-                let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
+                let _ = req.respond(json_response(
+                    &cors,
+                    403,
+                    r#"{"error":"missing header"}"#.into(),
+                ));
                 return;
             }
             let mut body = String::new();
@@ -309,18 +380,23 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 .read_to_string(&mut body)
                 .is_err()
             {
-                let _ = req.respond(json_response(400, r#"{"error":"bad body"}"#.into()));
+                let _ = req.respond(json_response(&cors, 400, r#"{"error":"bad body"}"#.into()));
                 return;
             }
             let beat: Heartbeat = match serde_json::from_str(&body) {
                 Ok(b) => b,
                 Err(_) => {
-                    let _ = req.respond(json_response(400, r#"{"error":"bad json"}"#.into()));
+                    let _ =
+                        req.respond(json_response(&cors, 400, r#"{"error":"bad json"}"#.into()));
                     return;
                 }
             };
             if !BROWSERS.contains(&beat.browser.as_str()) {
-                let _ = req.respond(json_response(400, r#"{"error":"unknown browser"}"#.into()));
+                let _ = req.respond(json_response(
+                    &cors,
+                    400,
+                    r#"{"error":"unknown browser"}"#.into(),
+                ));
                 return;
             }
             let tracking = shared.website_tracking.load(Ordering::SeqCst);
@@ -356,17 +432,25 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 focus_ends_at: focus.map(|f| f.plan_ends_at),
             };
             let _ = req.respond(json_response(
+                &cors,
                 200,
                 serde_json::to_string(&reply).unwrap_or_default(),
             ));
         }
         // No CORS headers: web pages' preflights fail, which is the point.
+        // Preflights get CORS headers only for extension origins, so web pages fail them.
         (Method::Options, _) => {
-            let _ = req.respond(Response::empty(204));
+            let _ = req.respond(with_cors(Response::empty(204), &cors, true));
         }
         _ => {
-            let _ = req.respond(json_response(404, r#"{"error":"not found"}"#.into()));
+            let _ = req.respond(json_response(&cors, 404, r#"{"error":"not found"}"#.into()));
         }
+    }
+}
+
+fn serve(server: &Server, shared: &Shared, conn: Option<&rusqlite::Connection>) {
+    for req in server.incoming_requests() {
+        handle(req, shared, conn);
     }
 }
 
@@ -385,9 +469,7 @@ pub fn spawn_server(shared: Arc<Shared>, db_path: std::path::PathBuf) {
             let conn = crate::db::open(&db_path)
                 .map_err(|e| eprintln!("[browser] database: {e}"))
                 .ok();
-            for req in server.incoming_requests() {
-                handle(req, &shared, conn.as_ref());
-            }
+            serve(&server, &shared, conn.as_ref());
             shared.server_running.store(false, Ordering::SeqCst);
         })
         .expect("failed to spawn browser API thread");
@@ -396,6 +478,90 @@ pub fn spawn_server(shared: Arc<Shared>, db_path: std::path::PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    /// Runs the real request handler on a spare port and talks raw HTTP to it,
+    /// the way each kind of client would.
+    #[test]
+    fn http_behaviour_for_extensions_and_web_pages() {
+        use std::io::Write;
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        thread::spawn(move || {
+            let shared = Shared::new(false, 300);
+            let conn = crate::db::open_in_memory().unwrap();
+            serve(&server, &shared, Some(&conn));
+        });
+        let send = |raw: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(raw.as_bytes()).unwrap();
+            let mut out = String::new();
+            let _ = s.read_to_string(&mut out);
+            out
+        };
+        let host = format!("Host: 127.0.0.1:{PORT}");
+        let get = |origin: &str, extra: &str| {
+            send(&format!(
+                "GET /v1/summary HTTP/1.1\r\n{host}\r\n{origin}{extra}Connection: close\r\n\r\n"
+            ))
+        };
+
+        // Firefox: opaque origin with the header -> allowed.
+        assert!(get("Origin: null\r\n", "X-FocusTrack: 1\r\n").starts_with("HTTP/1.1 200"));
+        // Chrome/Firefox extension origin -> allowed, and CORS echoes the origin.
+        let r = get("Origin: moz-extension://abc\r\n", "X-FocusTrack: 1\r\n");
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(
+            r.contains("Access-Control-Allow-Origin: moz-extension://abc"),
+            "{r}"
+        );
+        // Preflight from an extension gets CORS approval…
+        let pre = |origin: &str| {
+            send(&format!(
+                "OPTIONS /v1/summary HTTP/1.1\r\n{host}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: x-focustrack\r\nConnection: close\r\n\r\n"
+            ))
+        };
+        let ok = pre("chrome-extension://abc");
+        assert!(
+            ok.contains("Access-Control-Allow-Headers: Content-Type, X-FocusTrack"),
+            "{ok}"
+        );
+        // …but web pages don't, so browsers never send their real request.
+        assert!(!pre("https://evil.example").contains("Access-Control-Allow-Origin"));
+        assert!(!pre("null").contains("Access-Control-Allow-Origin"));
+        // Direct web-page requests and missing headers are refused.
+        assert!(
+            get("Origin: https://evil.example\r\n", "X-FocusTrack: 1\r\n")
+                .starts_with("HTTP/1.1 403")
+        );
+        assert!(get("Origin: null\r\n", "").starts_with("HTTP/1.1 403"));
+        let rebinding = send("GET /v1/summary HTTP/1.1\r\nHost: evil.example:17865\r\nX-FocusTrack: 1\r\nConnection: close\r\n\r\n");
+        assert!(rebinding.starts_with("HTTP/1.1 403"));
+    }
+
+    #[test]
+    fn origins_and_cors() {
+        assert!(origin_allowed(None));
+        assert!(
+            origin_allowed(Some("null")),
+            "Firefox may send an opaque origin"
+        );
+        assert!(origin_allowed(Some("moz-extension://abc")));
+        assert!(origin_allowed(Some("chrome-extension://abc")));
+        assert!(!origin_allowed(Some("https://evil.example")));
+        assert!(!origin_allowed(Some("http://localhost:3000")));
+        assert_eq!(
+            cors_origin(Some("moz-extension://abc")).as_deref(),
+            Some("moz-extension://abc")
+        );
+        assert_eq!(
+            cors_origin(Some("null")),
+            None,
+            "never grant CORS to opaque origins"
+        );
+        assert_eq!(cors_origin(Some("https://evil.example")), None);
+        assert_eq!(cors_origin(None), None);
+    }
 
     #[test]
     fn domains_are_normalized() {

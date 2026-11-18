@@ -18,7 +18,11 @@
       <ul id="chooser-list"></ul>
     </section>
 
-    <p id="offline" class="card offline" hidden>The FocusTrack app isn't running, so today's usage isn't available.</p>
+    <div id="offline" class="card offline" hidden>
+      <p>Can't reach the FocusTrack app. Make sure it's running (check the system tray).</p>
+      <p id="offline-detail" class="small muted"></p>
+      <button id="grant" class="btn" type="button" hidden>Allow access to FocusTrack</button>
+    </div>
     <main id="widgets"></main>
     <p class="note">Your browser's own new tab page is untouched. Keep this panel open beside it.</p>
     <script type="module" src="sidepanel.js"></script>

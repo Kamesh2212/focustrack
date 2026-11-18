@@ -66,62 +66,88 @@ async function activeState() {
   return { focused: !!win.focused, domain, tab };
 }
 
-let inFlight = false;
-let pending = false;
-
-async function beat() {
-  if (inFlight) {
-    pending = true;
-    return;
-  }
-  inFlight = true;
+/** Never let a tab we can't redirect (closing, dragged, privileged page) break the heartbeat. */
+async function safeEnforce(tab, state) {
   try {
-    const s = await activeState();
+    await enforce(tab, state);
+  } catch (e) {
+    console.warn("FocusTrack: could not redirect a blocked tab", e);
+  }
+}
+
+/** One request to the app, with a timeout. Throws a short, user-readable reason on failure. */
+async function send(s) {
+  let res;
+  try {
+    res = await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-FocusTrack": "1" },
+      body: JSON.stringify({ browser: BROWSER, domain: s.domain, focused: s.focused }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    throw new Error(e?.name === "TimeoutError" ? "timed out" : "can't reach 127.0.0.1:17865");
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+let current = null; // the heartbeat in progress, shared by everyone who asks
+let again = false;
+
+/** Sends a heartbeat. Concurrent callers share one request and all wait for its result. */
+function beat() {
+  if (current) {
+    again = true;
+    return current;
+  }
+  current = (async () => {
+    const s = await activeState().catch(() => ({ focused: false, domain: null, tab: null }));
+    let data;
     try {
-      const res = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-FocusTrack": "1" },
-        body: JSON.stringify({ browser: BROWSER, domain: s.domain, focused: s.focused }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const state = {
-        blocked: Array.isArray(data.blocked) ? data.blocked : [],
-        focusBlocked: Array.isArray(data.focusBlocked) ? data.focusBlocked : [],
-        focusAllowOnly: Array.isArray(data.focusAllowOnly) ? data.focusAllowOnly : null,
-        focusEndsAt: data.focusEndsAt ?? null,
-      };
-      const before = await blockState();
-      const wasFocus = before.focusBlocked.length > 0 || before.focusAllowOnly !== null;
-      await chrome.storage.session.set({
-        connected: true,
-        tracking: !!data.tracking,
-        ...state,
-        current: s.domain,
-        lastOk: Date.now(),
-      });
-      await enforce(s.tab, state);
-      // A focus round just started: close the door on distracting tabs that are already open.
-      if (!wasFocus && (state.focusBlocked.length || state.focusAllowOnly)) {
-        for (const tab of await chrome.tabs.query({})) await enforce(tab, state);
-      }
-    } catch {
-      await chrome.storage.session.set({ connected: false, current: s.domain });
+      data = await send(s);
+    } catch (e) {
+      // Only a failed request means the app isn't reachable.
+      await chrome.storage.session.set({ connected: false, lastError: e.message, current: s.domain });
+      return false;
     }
-  } finally {
-    inFlight = false;
-    if (pending) {
-      pending = false;
+    const state = {
+      blocked: Array.isArray(data.blocked) ? data.blocked : [],
+      focusBlocked: Array.isArray(data.focusBlocked) ? data.focusBlocked : [],
+      focusAllowOnly: Array.isArray(data.focusAllowOnly) ? data.focusAllowOnly : null,
+      focusEndsAt: data.focusEndsAt ?? null,
+    };
+    const before = await blockState();
+    const wasFocus = before.focusBlocked.length > 0 || before.focusAllowOnly !== null;
+    await chrome.storage.session.set({
+      connected: true,
+      lastError: null,
+      tracking: !!data.tracking,
+      ...state,
+      current: s.domain,
+      lastOk: Date.now(),
+    });
+    await safeEnforce(s.tab, state);
+    // A focus round just started: close the door on distracting tabs that are already open.
+    if (!wasFocus && (state.focusBlocked.length || state.focusAllowOnly)) {
+      for (const tab of await chrome.tabs.query({}).catch(() => [])) await safeEnforce(tab, state);
+    }
+    return true;
+  })().finally(() => {
+    current = null;
+    if (again) {
+      again = false;
       beat();
     }
-  }
+  });
+  return current;
 }
 
 chrome.tabs.onActivated.addListener(() => beat());
 chrome.windows.onFocusChanged.addListener(() => beat());
 chrome.tabs.onUpdated.addListener(async (_id, info, tab) => {
   if (!info.url && info.status !== "complete") return;
-  await enforce(tab, await blockState());
+  await safeEnforce(tab, await blockState());
   if (tab.active) beat();
 });
 
@@ -132,10 +158,10 @@ chrome.alarms.onAlarm.addListener((a) => {
 chrome.runtime.onStartup.addListener(() => beat());
 chrome.runtime.onInstalled.addListener(() => beat());
 
-// Popup and new-tab page ask for a fresh heartbeat.
+// The popup and side panel ask for a fresh heartbeat and get its outcome.
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === "refresh") {
-    beat().then(() => reply(true));
+    beat().then(reply, () => reply(false));
     return true;
   }
   return false;

@@ -4,21 +4,36 @@
 const BASE = "http://127.0.0.1:17865/v1";
 const HEADERS = { "X-FocusTrack": "1" };
 
-export async function fetchSummary() {
-  const res = await fetch(`${BASE}/summary`, { headers: HEADERS });
+const HOST = { origins: ["http://127.0.0.1:17865/*"] };
+
+/** fetch with a timeout and short, user-readable errors. */
+async function call(path, init = {}) {
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(5000) });
+  } catch (e) {
+    throw new Error(e?.name === "TimeoutError" ? "timed out" : "can't reach 127.0.0.1:17865");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-async function post(path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { ...HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+export const fetchSummary = () => call("/summary", { headers: HEADERS });
+
+const post = (path, body) =>
+  call(path, { method: "POST", headers: { ...HEADERS, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+/** Whether the browser lets the extension talk to the app (Firefox can withhold this). */
+export async function hasHostAccess() {
+  try {
+    return await chrome.permissions.contains(HOST);
+  } catch {
+    return true;
+  }
 }
+
+/** Must be called from a click. */
+export const requestHostAccess = () => chrome.permissions.request(HOST);
 
 export const toggleGoal = (id) => post("/goals/toggle", { id });
 export const saveQuickNote = (text) => post("/notes", { text });
