@@ -117,7 +117,7 @@ export default function App() {
           ))}
         </ul>
         <div className="mt-auto px-2 text-xs text-slate-400">
-          v0.1.0 · {isTauri ? "All data stays on this PC" : "Browser preview (sample data)"}
+          v{__APP_VERSION__} · {isTauri ? "All data stays on this PC" : "Browser preview (sample data)"}
         </div>
       </nav>
 

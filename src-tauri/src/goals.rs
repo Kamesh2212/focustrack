@@ -8,7 +8,13 @@ use crate::focus;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-pub const KINDS: &[&str] = &["max_screen", "min_category", "max_category", "min_focus_sessions", "custom"];
+pub const KINDS: &[&str] = &[
+    "max_screen",
+    "min_category",
+    "max_category",
+    "min_focus_sessions",
+    "custom",
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,7 +51,12 @@ pub fn label(kind: &str, category: Option<&str>, target: i64, title: Option<&str
         ("custom", Some(t)) => return t.to_string(),
         ("max_screen" | "max_category", Some(t)) => return format!("{t}: under {}", fmt(target)),
         ("min_category", Some(t)) => return format!("{t}: {}", fmt(target)),
-        ("min_focus_sessions", Some(t)) => return format!("{t}: {target} session{}", if target == 1 { "" } else { "s" }),
+        ("min_focus_sessions", Some(t)) => {
+            return format!(
+                "{t}: {target} session{}",
+                if target == 1 { "" } else { "s" }
+            )
+        }
         _ => {}
     }
     match kind {
@@ -53,14 +64,22 @@ pub fn label(kind: &str, category: Option<&str>, target: i64, title: Option<&str
         "max_screen" => format!("Keep screen time under {}", fmt(target)),
         "min_category" => format!("Spend at least {} on {}", fmt(target), cat),
         "max_category" => format!("Keep {} under {}", cat, fmt(target)),
-        "min_focus_sessions" => format!("Complete {} focus session{}", target, if target == 1 { "" } else { "s" }),
+        "min_focus_sessions" => format!(
+            "Complete {} focus session{}",
+            target,
+            if target == 1 { "" } else { "s" }
+        ),
         _ => kind.to_string(),
     }
 }
 
 pub fn state(kind: &str, current: i64, target: i64) -> &'static str {
     if kind.starts_with("max_") {
-        if current > target { "exceeded" } else { "on_track" }
+        if current > target {
+            "exceeded"
+        } else {
+            "on_track"
+        }
     } else if current >= target {
         "achieved"
     } else {
@@ -76,7 +95,9 @@ pub fn category_secs(conn: &Connection, day: &str, category_id: i64) -> rusqlite
          JOIN applications a ON a.id = s.app_id
          WHERE s.day = ?1 AND a.category_id = ?2 GROUP BY a.id",
     )?;
-    let rows = stmt.query_map(params![day, category_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map(params![day, category_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
     let mut total = 0;
     for row in rows {
         let (exe, secs) = row?;
@@ -99,7 +120,17 @@ pub fn goal_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<GoalSta
                 EXISTS (SELECT 1 FROM goal_checks k WHERE k.goal_id = g.id AND k.day = ?1)
          FROM goals g LEFT JOIN categories c ON c.id = g.category_id ORDER BY g.id",
     )?;
-    type Row = (i64, String, Option<i64>, Option<String>, String, i64, bool, Option<String>, bool);
+    type Row = (
+        i64,
+        String,
+        Option<i64>,
+        Option<String>,
+        String,
+        i64,
+        bool,
+        Option<String>,
+        bool,
+    );
     let rows: Vec<Row> = stmt
         .query_map(params![day], |r| {
             Ok((
@@ -158,7 +189,11 @@ pub fn goal_notice(g: &GoalStatus) -> Option<(String, String, String)> {
     match g.state.as_str() {
         // You ticked it yourself; no need to tell you.
         "achieved" if g.kind == "custom" => None,
-        "achieved" => Some((format!("goal:{}:achieved", g.id), "Goal achieved".into(), format!("{} — done for today.", g.label))),
+        "achieved" => Some((
+            format!("goal:{}:achieved", g.id),
+            "Goal achieved".into(),
+            format!("{} — done for today.", g.label),
+        )),
         "exceeded" => Some((
             format!("goal:{}:exceeded", g.id),
             "Daily goal missed".into(),
@@ -170,11 +205,17 @@ pub fn goal_notice(g: &GoalStatus) -> Option<(String, String, String)> {
 
 /// Ticks or unticks a custom goal for `day`. Returns the new state.
 pub fn toggle_check(conn: &Connection, id: i64, day: &str) -> rusqlite::Result<bool> {
-    let removed = conn.execute("DELETE FROM goal_checks WHERE goal_id = ?1 AND day = ?2", params![id, day])?;
+    let removed = conn.execute(
+        "DELETE FROM goal_checks WHERE goal_id = ?1 AND day = ?2",
+        params![id, day],
+    )?;
     if removed > 0 {
         return Ok(false);
     }
-    conn.execute("INSERT INTO goal_checks (goal_id, day) VALUES (?1, ?2)", params![id, day])?;
+    conn.execute(
+        "INSERT INTO goal_checks (goal_id, day) VALUES (?1, ?2)",
+        params![id, day],
+    )?;
     Ok(true)
 }
 
@@ -186,12 +227,30 @@ mod tests {
 
     #[test]
     fn labels_and_states() {
-        assert_eq!(label("max_screen", None, 6 * 3600, None), "Keep screen time under 6h");
-        assert_eq!(label("min_category", Some("Study"), 7200, None), "Spend at least 2h on Study");
-        assert_eq!(label("min_category", Some("Development"), 7200, Some("Coding")), "Coding: 2h");
-        assert_eq!(label("max_category", Some("Social Media"), 1800, None), "Keep Social Media under 30m");
-        assert_eq!(label("min_focus_sessions", None, 3, None), "Complete 3 focus sessions");
-        assert_eq!(label("custom", None, 0, Some("Read 20 pages")), "Read 20 pages");
+        assert_eq!(
+            label("max_screen", None, 6 * 3600, None),
+            "Keep screen time under 6h"
+        );
+        assert_eq!(
+            label("min_category", Some("Study"), 7200, None),
+            "Spend at least 2h on Study"
+        );
+        assert_eq!(
+            label("min_category", Some("Development"), 7200, Some("Coding")),
+            "Coding: 2h"
+        );
+        assert_eq!(
+            label("max_category", Some("Social Media"), 1800, None),
+            "Keep Social Media under 30m"
+        );
+        assert_eq!(
+            label("min_focus_sessions", None, 3, None),
+            "Complete 3 focus sessions"
+        );
+        assert_eq!(
+            label("custom", None, 0, Some("Read 20 pages")),
+            "Read 20 pages"
+        );
         assert_eq!(state("max_screen", 100, 200), "on_track");
         assert_eq!(state("max_screen", 300, 200), "exceeded");
         assert_eq!(state("min_category", 100, 200), "in_progress");
@@ -201,23 +260,56 @@ mod tests {
     #[test]
     fn category_time_combines_apps_and_websites_without_double_counting() {
         let conn = db::open_in_memory().unwrap();
-        let t = |h| NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, 0, 0).unwrap();
-        let edu: i64 = conn.query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| r.get(0)).unwrap();
-        let (anki, _) = db::get_or_create_app(&conn, "anki.exe", "", || "Anki".into(), t(9)).unwrap();
-        let (chrome, _) = db::get_or_create_app(&conn, "chrome.exe", "", || "Chrome".into(), t(9)).unwrap();
-        conn.execute("UPDATE applications SET category_id = ?1 WHERE id = ?2", params![edu, chrome]).unwrap();
+        let t = |h| {
+            NaiveDate::from_ymd_opt(2026, 11, 18)
+                .unwrap()
+                .and_hms_opt(h, 0, 0)
+                .unwrap()
+        };
+        let edu: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let (anki, _) =
+            db::get_or_create_app(&conn, "anki.exe", "", || "Anki".into(), t(9)).unwrap();
+        let (chrome, _) =
+            db::get_or_create_app(&conn, "chrome.exe", "", || "Chrome".into(), t(9)).unwrap();
+        conn.execute(
+            "UPDATE applications SET category_id = ?1 WHERE id = ?2",
+            params![edu, chrome],
+        )
+        .unwrap();
         for (app, h) in [(anki, 9), (chrome, 10)] {
             let id = db::insert_usage(&conn, app, t(h)).unwrap();
-            db::update_span(&conn, db::SpanKind::Usage, id, t(h), t(h) + chrono::Duration::minutes(30)).unwrap();
+            db::update_span(
+                &conn,
+                db::SpanKind::Usage,
+                id,
+                t(h),
+                t(h) + chrono::Duration::minutes(30),
+            )
+            .unwrap();
         }
         let site = db::get_or_create_website(&conn, "coursera.org", t(10)).unwrap();
         let w = db::insert_website_session(&conn, site, "chrome", t(10)).unwrap();
-        db::update_span(&conn, db::SpanKind::Website, w, t(10), t(10) + chrono::Duration::minutes(20)).unwrap();
+        db::update_span(
+            &conn,
+            db::SpanKind::Website,
+            w,
+            t(10),
+            t(10) + chrono::Duration::minutes(20),
+        )
+        .unwrap();
 
         // Anki 30m + coursera 20m; the browser's own 30m is not added again.
         assert_eq!(category_secs(&conn, "2026-11-18", edu).unwrap(), 50 * 60);
 
-        conn.execute("INSERT INTO goals (kind, category_id, target) VALUES ('min_category', ?1, 3600)", params![edu]).unwrap();
+        conn.execute(
+            "INSERT INTO goals (kind, category_id, target) VALUES ('min_category', ?1, 3600)",
+            params![edu],
+        )
+        .unwrap();
         let g = &goal_status(&conn, "2026-11-18").unwrap()[0];
         assert_eq!((g.current, g.state.as_str()), (3000, "in_progress"));
         assert!(goal_notice(g).is_none());
@@ -226,14 +318,28 @@ mod tests {
     #[test]
     fn custom_goals_are_ticked_per_day() {
         let conn = db::open_in_memory().unwrap();
-        conn.execute("INSERT INTO goals (kind, title) VALUES ('custom', 'Exercise for 30 minutes')", []).unwrap();
+        conn.execute(
+            "INSERT INTO goals (kind, title) VALUES ('custom', 'Exercise for 30 minutes')",
+            [],
+        )
+        .unwrap();
         let g = &goal_status(&conn, "2026-11-18").unwrap()[0];
-        assert_eq!((g.label.as_str(), g.state.as_str()), ("Exercise for 30 minutes", "in_progress"));
+        assert_eq!(
+            (g.label.as_str(), g.state.as_str()),
+            ("Exercise for 30 minutes", "in_progress")
+        );
         assert!(toggle_check(&conn, g.id, "2026-11-18").unwrap());
         let g = &goal_status(&conn, "2026-11-18").unwrap()[0];
         assert_eq!((g.current, g.state.as_str()), (1, "achieved"));
-        assert!(goal_notice(g).is_none(), "no notification for goals you tick yourself");
-        assert_eq!(goal_status(&conn, "2026-11-19").unwrap()[0].state, "in_progress", "resets the next day");
+        assert!(
+            goal_notice(g).is_none(),
+            "no notification for goals you tick yourself"
+        );
+        assert_eq!(
+            goal_status(&conn, "2026-11-19").unwrap()[0].state,
+            "in_progress",
+            "resets the next day"
+        );
         assert!(!toggle_check(&conn, g.id, "2026-11-18").unwrap());
     }
 }

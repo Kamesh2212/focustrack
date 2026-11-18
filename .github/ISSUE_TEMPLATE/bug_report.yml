@@ -1,0 +1,58 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems? Please use **Security → Report a vulnerability** instead.
+        Please don't paste personal usage data you'd rather keep private.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Usage Limits
+        2. Add a limit for …
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Tracking (apps / idle)
+        - Website tracking / extension
+        - Limits & blocking
+        - Focus / Study mode
+        - Goals / Notes
+        - Dashboard / Reports / History
+        - Installer / startup
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FocusTrack version
+      placeholder: "1.0.0 (shown at the bottom of the sidebar)"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version and browser
+      placeholder: "Windows 11 23H2, Brave 1.x"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots or logs
+      description: Optional. Remove anything personal.

@@ -73,14 +73,20 @@ pub fn totals(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<(i64,
 }
 
 /// One entry per calendar day in the range (zero-filled).
-pub fn daily_totals(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqlite::Result<Vec<DayTotal>> {
+pub fn daily_totals(
+    conn: &Connection,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> rusqlite::Result<Vec<DayTotal>> {
     let (f, t) = (fmt_day(from), fmt_day(to));
     let mut map: HashMap<String, (i64, i64)> = HashMap::new();
     {
         let mut stmt = conn.prepare(
             "SELECT day, SUM(duration_secs) FROM usage_sessions WHERE day BETWEEN ?1 AND ?2 GROUP BY day",
         )?;
-        let rows = stmt.query_map(params![f, t], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map(params![f, t], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for row in rows {
             let (d, s) = row?;
             map.entry(d).or_default().0 = s;
@@ -90,7 +96,9 @@ pub fn daily_totals(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqli
         let mut stmt = conn.prepare(
             "SELECT day, SUM(duration_secs) FROM idle_periods WHERE day BETWEEN ?1 AND ?2 GROUP BY day",
         )?;
-        let rows = stmt.query_map(params![f, t], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map(params![f, t], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for row in rows {
             let (d, s) = row?;
             map.entry(d).or_default().1 = s;
@@ -101,7 +109,11 @@ pub fn daily_totals(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqli
         .map(|d| {
             let key = fmt_day(d);
             let (a, i) = map.get(&key).copied().unwrap_or((0, 0));
-            DayTotal { day: key, active_secs: a, idle_secs: i }
+            DayTotal {
+                day: key,
+                active_secs: a,
+                idle_secs: i,
+            }
         })
         .collect())
 }
@@ -135,7 +147,11 @@ pub fn app_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
     out
 }
 
-pub fn category_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<CategoryUsage>> {
+pub fn category_usage(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<CategoryUsage>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral'),
                 SUM(s.duration_secs) AS secs
@@ -148,7 +164,12 @@ pub fn category_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Resu
          ORDER BY secs DESC",
     )?;
     let rows = stmt.query_map(params![from, to], |r| {
-        Ok(CategoryUsage { name: r.get(0)?, color: r.get(1)?, kind: r.get(2)?, secs: r.get(3)? })
+        Ok(CategoryUsage {
+            name: r.get(0)?,
+            color: r.get(1)?,
+            kind: r.get(2)?,
+            secs: r.get(3)?,
+        })
     })?;
     let out = rows.collect();
     out
@@ -204,12 +225,18 @@ pub fn site_total(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<i
 }
 
 /// Active spans in the range, ordered by start.
-pub fn active_spans(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
+pub fn active_spans(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
     let mut stmt = conn.prepare(
         "SELECT start_time, end_time FROM usage_sessions
          WHERE day BETWEEN ?1 AND ?2 AND duration_secs > 0 ORDER BY start_time",
     )?;
-    let rows = stmt.query_map(params![from, to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map(params![from, to], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     let mut out = Vec::new();
     for row in rows {
         let (s, e) = row?;
@@ -256,14 +283,26 @@ pub fn count_sessions(spans: &[(NaiveDateTime, NaiveDateTime)], gap_secs: i64) -
 }
 
 pub fn productive_split(categories: &[CategoryUsage]) -> (i64, i64) {
-    let productive = categories.iter().filter(|c| c.kind == "productive").map(|c| c.secs).sum();
-    let distracting = categories.iter().filter(|c| c.kind == "distracting").map(|c| c.secs).sum();
+    let productive = categories
+        .iter()
+        .filter(|c| c.kind == "productive")
+        .map(|c| c.secs)
+        .sum();
+    let distracting = categories
+        .iter()
+        .filter(|c| c.kind == "distracting")
+        .map(|c| c.secs)
+        .sum();
     (productive, distracting)
 }
 
 /// Average active seconds over days that have any recorded activity.
 pub fn average_of_active_days(days: &[DayTotal]) -> i64 {
-    let used: Vec<i64> = days.iter().map(|d| d.active_secs).filter(|s| *s > 0).collect();
+    let used: Vec<i64> = days
+        .iter()
+        .map(|d| d.active_secs)
+        .filter(|s| *s > 0)
+        .collect();
     if used.is_empty() {
         0
     } else {
@@ -276,7 +315,10 @@ mod tests {
     use super::*;
 
     fn at(d: u32, h: u32, m: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, 0).unwrap()
+        NaiveDate::from_ymd_opt(2026, 11, d)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
     }
 
     #[test]
@@ -294,8 +336,8 @@ mod tests {
     fn sessions_split_on_long_gaps() {
         let spans = [
             (at(18, 9, 0), at(18, 9, 30)),
-            (at(18, 9, 32), at(18, 10, 0)),  // 2 min gap: same session
-            (at(18, 13, 0), at(18, 14, 0)),  // lunch: new session
+            (at(18, 9, 32), at(18, 10, 0)), // 2 min gap: same session
+            (at(18, 13, 0), at(18, 14, 0)), // lunch: new session
         ];
         assert_eq!(count_sessions(&spans, SESSION_GAP_SECS), 2);
         assert_eq!(count_sessions(&[], SESSION_GAP_SECS), 0);
@@ -310,7 +352,11 @@ mod tests {
 
     #[test]
     fn average_ignores_empty_days() {
-        let mk = |s| DayTotal { day: String::new(), active_secs: s, idle_secs: 0 };
+        let mk = |s| DayTotal {
+            day: String::new(),
+            active_secs: s,
+            idle_secs: 0,
+        };
         assert_eq!(average_of_active_days(&[mk(0), mk(100), mk(300)]), 200);
         assert_eq!(average_of_active_days(&[mk(0)]), 0);
     }
@@ -326,7 +372,11 @@ pub struct DayKinds {
 }
 
 /// App time per day split by category kind (zero-filled).
-pub fn daily_kinds(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqlite::Result<Vec<DayKinds>> {
+pub fn daily_kinds(
+    conn: &Connection,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> rusqlite::Result<Vec<DayKinds>> {
     let mut stmt = conn.prepare(
         "SELECT s.day, COALESCE(c.kind, 'neutral'), SUM(s.duration_secs)
          FROM usage_sessions s JOIN applications a ON a.id = s.app_id
@@ -335,11 +385,20 @@ pub fn daily_kinds(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqlit
     )?;
     let mut map: HashMap<String, DayKinds> = HashMap::new();
     let rows = stmt.query_map(params![fmt_day(from), fmt_day(to)], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     for row in rows {
         let (day, kind, secs) = row?;
-        let e = map.entry(day.clone()).or_insert(DayKinds { day, productive_secs: 0, neutral_secs: 0, distracting_secs: 0 });
+        let e = map.entry(day.clone()).or_insert(DayKinds {
+            day,
+            productive_secs: 0,
+            neutral_secs: 0,
+            distracting_secs: 0,
+        });
         match kind.as_str() {
             "productive" => e.productive_secs += secs,
             "distracting" => e.distracting_secs += secs,
@@ -350,7 +409,12 @@ pub fn daily_kinds(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqlit
         .into_iter()
         .map(|d| {
             let key = fmt_day(d);
-            map.remove(&key).unwrap_or(DayKinds { day: key, productive_secs: 0, neutral_secs: 0, distracting_secs: 0 })
+            map.remove(&key).unwrap_or(DayKinds {
+                day: key,
+                productive_secs: 0,
+                neutral_secs: 0,
+                distracting_secs: 0,
+            })
         })
         .collect())
 }

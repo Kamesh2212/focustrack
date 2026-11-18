@@ -1,6 +1,6 @@
 [package]
 name = "focustrack"
-version = "0.1.0"
+version = "1.0.0"
 description = "FocusTrack - Windows screen time & digital wellbeing"
 edition = "2021"
 
@@ -18,7 +18,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tiny_http = "0.12"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

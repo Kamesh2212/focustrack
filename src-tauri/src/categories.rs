@@ -19,11 +19,11 @@ pub const DEFAULT_CATEGORIES: &[(&str, &str, &str)] = &[
 pub fn default_category_for(exe_lower: &str) -> &'static str {
     let stem = exe_lower.strip_suffix(".exe").unwrap_or(exe_lower);
     match stem {
-        "code" | "code - insiders" | "cursor" | "devenv" | "idea64" | "pycharm64" | "webstorm64"
-        | "rider64" | "clion64" | "goland64" | "android studio" | "studio64" | "sublime_text"
-        | "notepad++" | "windowsterminal" | "wt" | "powershell" | "pwsh" | "cmd" | "conhost"
-        | "git-bash" | "mintty" | "postman" | "docker desktop" | "gitkraken" | "githubdesktop"
-        | "zed" | "nvim-qt" => "Development",
+        "code" | "code - insiders" | "cursor" | "devenv" | "idea64" | "pycharm64"
+        | "webstorm64" | "rider64" | "clion64" | "goland64" | "android studio" | "studio64"
+        | "sublime_text" | "notepad++" | "windowsterminal" | "wt" | "powershell" | "pwsh"
+        | "cmd" | "conhost" | "git-bash" | "mintty" | "postman" | "docker desktop"
+        | "gitkraken" | "githubdesktop" | "zed" | "nvim-qt" => "Development",
 
         "winword" | "excel" | "powerpnt" | "onenote" | "msaccess" | "mspub" | "notion"
         | "obsidian" | "evernote" | "acrobat" | "acrord32" | "sumatrapdf" | "figma"
@@ -31,7 +31,8 @@ pub fn default_category_for(exe_lower: &str) -> &'static str {
             "Productivity"
         }
 
-        "anki" | "zotero" | "mendeley" | "kindle" | "duolingo" | "goodnotes" | "xodo" | "calibre" => "Study",
+        "anki" | "zotero" | "mendeley" | "kindle" | "duolingo" | "goodnotes" | "xodo"
+        | "calibre" => "Study",
 
         "discord" | "slack" | "teams" | "ms-teams" | "outlook" | "olk" | "zoom" | "skype"
         | "whatsapp" | "telegram" | "signal" | "thunderbird" | "mailspring" => "Communication",
@@ -42,8 +43,8 @@ pub fn default_category_for(exe_lower: &str) -> &'static str {
         "instagram" | "facebook" | "twitter" | "x" | "tiktok" | "reddit" => "Social Media",
 
         "steam" | "steamwebhelper" | "epicgameslauncher" | "battle.net" | "riotclientservices"
-        | "leagueclient" | "valorant" | "minecraft" | "javaw" | "robloxplayerbeta" | "gog galaxy"
-        | "xboxapp" | "gamebar" => "Gaming",
+        | "leagueclient" | "valorant" | "minecraft" | "javaw" | "robloxplayerbeta"
+        | "gog galaxy" | "xboxapp" | "gamebar" => "Gaming",
 
         _ => "Other",
     }
@@ -153,9 +154,21 @@ pub fn default_category_for_domain(domain: &str) -> &'static str {
 }
 
 /// Exe stems and domains that moved from Education to Study in schema v4.
-pub const STUDY_EXES: &[&str] = &["anki.exe", "zotero.exe", "mendeley.exe", "kindle.exe", "duolingo.exe"];
+pub const STUDY_EXES: &[&str] = &[
+    "anki.exe",
+    "zotero.exe",
+    "mendeley.exe",
+    "kindle.exe",
+    "duolingo.exe",
+];
 pub const STUDY_DOMAINS: &[&str] = &[
-    "coursera.org", "udemy.com", "edx.org", "khanacademy.org", "duolingo.com", "leetcode.com", "scholar.google.com",
+    "coursera.org",
+    "udemy.com",
+    "edx.org",
+    "khanacademy.org",
+    "duolingo.com",
+    "leetcode.com",
+    "scholar.google.com",
 ];
 
 /// Browser family for a foreground executable, matching what the extension
@@ -181,9 +194,18 @@ mod tests {
     #[test]
     fn domains_map_to_categories() {
         assert_eq!(default_category_for_domain("youtube.com"), "Entertainment");
-        assert_eq!(default_category_for_domain("m.youtube.com"), "Entertainment");
-        assert_eq!(default_category_for_domain("mail.google.com"), "Communication");
-        assert_eq!(default_category_for_domain("docs.google.com"), "Productivity");
+        assert_eq!(
+            default_category_for_domain("m.youtube.com"),
+            "Entertainment"
+        );
+        assert_eq!(
+            default_category_for_domain("mail.google.com"),
+            "Communication"
+        );
+        assert_eq!(
+            default_category_for_domain("docs.google.com"),
+            "Productivity"
+        );
         assert_eq!(default_category_for_domain("google.com"), "Other");
         assert_eq!(default_category_for_domain("en.wikipedia.org"), "Education");
         assert_eq!(default_category_for_domain("example.org"), "Other");
@@ -210,7 +232,16 @@ mod tests {
     #[test]
     fn every_default_target_exists() {
         let names: Vec<&str> = DEFAULT_CATEGORIES.iter().map(|c| c.0).collect();
-        for exe in ["code.exe", "excel.exe", "anki.exe", "slack.exe", "vlc.exe", "tiktok.exe", "steam.exe", "x.exe"] {
+        for exe in [
+            "code.exe",
+            "excel.exe",
+            "anki.exe",
+            "slack.exe",
+            "vlc.exe",
+            "tiktok.exe",
+            "steam.exe",
+            "x.exe",
+        ] {
             assert!(names.contains(&default_category_for(exe)));
         }
     }

@@ -28,7 +28,8 @@ fn u16le(d: &[u8], at: usize) -> Option<u16> {
 }
 
 fn u32le(d: &[u8], at: usize) -> Option<u32> {
-    d.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    d.get(at..at + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 fn cstr_ansi(d: &[u8], at: usize) -> Option<String> {
@@ -103,7 +104,12 @@ pub fn parse_lnk(d: &[u8]) -> Option<Shortcut> {
         let raw = d.get(pos..pos + bytes)?;
         if is_args {
             let s = if unicode {
-                let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = raw
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
                 String::from_utf16_lossy(&units)
             } else {
                 String::from_utf8_lossy(raw).into_owned()
@@ -150,8 +156,15 @@ pub fn clean_path(raw: &str) -> String {
 
 /// Command hosts that shortcuts launch scripts with; the shortcut isn't the app.
 const HOSTS: &[&str] = &[
-    "cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mmc.exe", "conhost.exe",
-    "explorer.exe", "control.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mmc.exe",
+    "conhost.exe",
+    "explorer.exe",
+    "control.exe",
 ];
 
 /// Uninstallers, installers, updaters, runtimes, helpers and crash reporters
@@ -159,10 +172,31 @@ const HOSTS: &[&str] = &[
 pub fn is_noise(exe_name: &str, name: &str) -> bool {
     let e = exe_name.to_ascii_lowercase();
     let n = name.to_ascii_lowercase();
-    let exe_words = ["redist", "runtime", "clicktorun", "upgrader", "update", "plugin", "helper", "-amd64", "-x64", "-win"];
+    let exe_words = [
+        "redist",
+        "runtime",
+        "clicktorun",
+        "upgrader",
+        "update",
+        "plugin",
+        "helper",
+        "-amd64",
+        "-x64",
+        "-win",
+    ];
     let name_words = [
-        "redistributable", "runtime", "driver", "plugin", " sdk", "update", "installation assistant",
-        "component", "handler", "language preferences", "reload configuration", "shell ext",
+        "redistributable",
+        "runtime",
+        "driver",
+        "plugin",
+        " sdk",
+        "update",
+        "installation assistant",
+        "component",
+        "handler",
+        "language preferences",
+        "reload configuration",
+        "shell ext",
     ];
     !e.ends_with(".exe")
         || HOSTS.contains(&e.as_str())
@@ -210,24 +244,30 @@ fn add(map: &mut HashMap<String, InstalledApp>, path: &str, name: &str, check_ex
         return;
     }
     let lower = path.to_ascii_lowercase();
-    if lower.contains(r"\package cache\") || lower.contains(r"\installer\") || lower.contains(r"\windows\installer") {
+    if lower.contains(r"\package cache\")
+        || lower.contains(r"\installer\")
+        || lower.contains(r"\windows\installer")
+    {
         return;
     }
     if check_exists && !Path::new(path).exists() {
         return;
     }
-    map.entry(exe.to_ascii_lowercase()).or_insert_with(|| InstalledApp {
-        exe_name: exe,
-        name: name.to_string(),
-        path: path.to_string(),
-    });
+    map.entry(exe.to_ascii_lowercase())
+        .or_insert_with(|| InstalledApp {
+            exe_name: exe,
+            name: name.to_string(),
+            path: path.to_string(),
+        });
 }
 
 fn walk_lnk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     if depth > 4 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -240,7 +280,8 @@ fn walk_lnk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
 
 // --------------------------------------------------------------- discovery
 
-static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<InstalledApp>)>> = std::sync::Mutex::new(None);
+static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<InstalledApp>)>> =
+    std::sync::Mutex::new(None);
 
 /// `scan()` cached for 10 minutes (it reads the Start Menu and registry).
 pub fn cached() -> Vec<InstalledApp> {
@@ -273,11 +314,16 @@ pub fn scan() -> Vec<InstalledApp> {
         walk_lnk(r, &mut links, 0);
     }
     for link in links {
-        let Ok(data) = std::fs::read(&link) else { continue };
+        let Ok(data) = std::fs::read(&link) else {
+            continue;
+        };
         let Some(sc) = parse_lnk(&data) else { continue };
         let Some(target) = sc.target else { continue };
         let target = squirrel_target(&target, sc.arguments.as_deref()).unwrap_or(target);
-        let name = link.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = link
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         add(&mut map, &target, &name, true);
     }
 
@@ -297,7 +343,10 @@ mod registry {
     use winreg::RegKey;
 
     pub fn scan(map: &mut HashMap<String, InstalledApp>) {
-        let hives = [RegKey::predef(HKEY_LOCAL_MACHINE), RegKey::predef(HKEY_CURRENT_USER)];
+        let hives = [
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            RegKey::predef(HKEY_CURRENT_USER),
+        ];
 
         // 2. Installed programs whose icon is their exe.
         let uninstall = [
@@ -306,13 +355,20 @@ mod registry {
         ];
         for hive in &hives {
             for path in uninstall {
-                let Ok(root) = hive.open_subkey_with_flags(path, KEY_READ) else { continue };
+                let Ok(root) = hive.open_subkey_with_flags(path, KEY_READ) else {
+                    continue;
+                };
                 for key in root.enum_keys().flatten() {
-                    let Ok(k) = root.open_subkey_with_flags(&key, KEY_READ) else { continue };
+                    let Ok(k) = root.open_subkey_with_flags(&key, KEY_READ) else {
+                        continue;
+                    };
                     if k.get_value::<u32, _>("SystemComponent").unwrap_or(0) == 1 {
                         continue;
                     }
-                    let (Ok(name), Ok(icon)) = (k.get_value::<String, _>("DisplayName"), k.get_value::<String, _>("DisplayIcon")) else {
+                    let (Ok(name), Ok(icon)) = (
+                        k.get_value::<String, _>("DisplayName"),
+                        k.get_value::<String, _>("DisplayIcon"),
+                    ) else {
                         continue;
                     };
                     let exe = clean_path(&icon);
@@ -358,9 +414,15 @@ mod tests {
 
     #[test]
     fn parses_shortcut_target_and_args() {
-        let d = make_lnk(r"C:\Users\me\AppData\Local\Discord\Update.exe", "--processStart Discord.exe");
+        let d = make_lnk(
+            r"C:\Users\me\AppData\Local\Discord\Update.exe",
+            "--processStart Discord.exe",
+        );
         let sc = parse_lnk(&d).unwrap();
-        assert_eq!(sc.target.as_deref(), Some(r"C:\Users\me\AppData\Local\Discord\Update.exe"));
+        assert_eq!(
+            sc.target.as_deref(),
+            Some(r"C:\Users\me\AppData\Local\Discord\Update.exe")
+        );
         assert_eq!(sc.arguments.as_deref(), Some("--processStart Discord.exe"));
         assert_eq!(
             squirrel_target(sc.target.as_deref().unwrap(), sc.arguments.as_deref()).as_deref(),
@@ -374,7 +436,10 @@ mod tests {
         assert!(is_noise("unins000.exe", "Uninstall Foo"));
         assert!(is_noise("Update.exe", "Discord"));
         assert!(is_noise("foo.exe", "Foo Website"));
-        assert!(is_noise("VC_redist.x64.exe", "Microsoft Visual C++ Redistributable"));
+        assert!(is_noise(
+            "VC_redist.x64.exe",
+            "Microsoft Visual C++ Redistributable"
+        ));
         assert!(is_noise("cmd.exe", "Install Additional Tools for Node.js"));
         assert!(is_noise("SDXHelper.exe", "Microsoft Office SDX Helper"));
         assert!(!is_noise("WINWORD.EXE", "Word"));
@@ -396,6 +461,8 @@ mod tests {
     fn finds_some_apps_on_this_machine() {
         let apps = scan();
         assert!(!apps.is_empty(), "expected at least one installed app");
-        assert!(apps.iter().all(|a| a.exe_name.to_ascii_lowercase().ends_with(".exe")));
+        assert!(apps
+            .iter()
+            .all(|a| a.exe_name.to_ascii_lowercase().ends_with(".exe")));
     }
 }

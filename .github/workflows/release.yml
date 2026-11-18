@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Build Windows installers and publish
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "v$version" = "$TAG" ] || { echo "Tag $TAG does not match package.json version $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      - name: Test
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          npm run build --prefix ..
+          cargo test --locked
+
+      - name: Build installers
+        run: npm run tauri build
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $v = $env:VERSION
+          $bundle = "src-tauri/target/release/bundle"
+          $out = "release"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $setup = Get-ChildItem "$bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $msi = Get-ChildItem "$bundle/msi/*.msi" | Select-Object -First 1
+          Copy-Item $setup.FullName "$out/FocusTrack_${v}_x64-setup.exe"
+          Copy-Item $msi.FullName "$out/FocusTrack_${v}_x64.msi"
+
+          # Browser extension on its own
+          Compress-Archive -Path extension/* -DestinationPath "$out/FocusTrack-extension-$v.zip"
+
+          # One zip with everything a user needs
+          $stage = "stage/FocusTrack-$v-windows-x64"
+          New-Item -ItemType Directory -Force "$stage/extension" | Out-Null
+          Copy-Item "$out/FocusTrack_${v}_x64-setup.exe" $stage
+          Copy-Item -Recurse extension/* "$stage/extension"
+          Copy-Item LICENSE, README.md $stage
+          @"
+          FocusTrack $v for Windows 10/11
+
+          1. Run FocusTrack_${v}_x64-setup.exe.
+             If SmartScreen says "Windows protected your PC", choose More info -> Run anyway
+             (the installer is not code-signed yet).
+          2. Optional - browser extension (website tracking, website limits, side panel):
+             Chrome/Edge/Brave: open chrome://extensions, enable Developer mode,
+             click "Load unpacked" and choose the "extension" folder in this zip.
+             Firefox: about:debugging -> This Firefox -> Load Temporary Add-on -> extension/manifest.json
+          3. In FocusTrack -> Settings, turn on "Start with Windows".
+
+          Docs and issues: https://github.com/${{ github.repository }}
+          "@ | Set-Content -Encoding utf8 "$stage/INSTALL.txt"
+          Compress-Archive -Path $stage -DestinationPath "$out/FocusTrack-$v-windows-x64.zip"
+
+          Get-ChildItem $out -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii "$out/SHA256SUMS.txt"
+          Get-ChildItem $out
+
+      - name: Release notes from CHANGELOG
+        shell: bash
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on && /^\[[0-9]/ {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<EOF
+
+          ## Download
+
+          **[FocusTrack-$VERSION-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/FocusTrack-$VERSION-windows-x64.zip)** contains the installer, the browser extension and install steps.
+          Installers are not code-signed yet: if SmartScreen appears, choose **More info → Run anyway**, and check files against \`SHA256SUMS.txt\`.
+          EOF
+          cat notes.md
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "FocusTrack $VERSION" --notes-file notes.md --latest
+          fi

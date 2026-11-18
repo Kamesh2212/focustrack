@@ -91,21 +91,31 @@ fn row_to_profile(r: &rusqlite::Row) -> rusqlite::Result<Profile> {
 const COLS: &str = "id, name, mode, categories, apps, sites, unblock_on_breaks, end_early, builtin";
 
 pub fn list(conn: &Connection) -> rusqlite::Result<Vec<Profile>> {
-    let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM block_profiles ORDER BY builtin DESC, id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM block_profiles ORDER BY builtin DESC, id"
+    ))?;
     let rows = stmt.query_map([], row_to_profile)?;
     let out = rows.collect();
     out
 }
 
 pub fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Profile>> {
-    conn.query_row(&format!("SELECT {COLS} FROM block_profiles WHERE id = ?1"), params![id], row_to_profile)
-        .optional()
+    conn.query_row(
+        &format!("SELECT {COLS} FROM block_profiles WHERE id = ?1"),
+        params![id],
+        row_to_profile,
+    )
+    .optional()
 }
 
 pub fn save(conn: &Connection, p: &Profile) -> Result<i64, String> {
     p.validate()?;
     let clean = |v: &[String]| {
-        let set: BTreeSet<String> = v.iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect();
+        let set: BTreeSet<String> = v
+            .iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
         serde_json::to_string(&set.into_iter().collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
     };
     let cats = serde_json::to_string(&p.categories).unwrap_or_else(|_| "[]".into());
@@ -135,28 +145,48 @@ pub fn save(conn: &Connection, p: &Profile) -> Result<i64, String> {
 }
 
 pub fn delete(conn: &Connection, id: i64) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM block_profiles WHERE id = ?1 AND builtin = 0", params![id])?;
+    conn.execute(
+        "DELETE FROM block_profiles WHERE id = ?1 AND builtin = 0",
+        params![id],
+    )?;
     Ok(())
 }
 
 /// Every app we know of (used or installed) with its category.
-fn candidate_apps(conn: &Connection, installed: &[InstalledApp]) -> rusqlite::Result<BTreeMap<String, AppRef>> {
+fn candidate_apps(
+    conn: &Connection,
+    installed: &[InstalledApp],
+) -> rusqlite::Result<BTreeMap<String, AppRef>> {
     let mut out = BTreeMap::new();
     let mut stmt = conn.prepare(
         "SELECT a.exe_name, a.display_name, COALESCE(c.name, 'Other') FROM applications a
          LEFT JOIN categories c ON c.id = a.category_id",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
     for row in rows {
         let (exe, name, category) = row?;
-        out.insert(exe.to_ascii_lowercase(), AppRef { name, exe_name: exe, category });
+        out.insert(
+            exe.to_ascii_lowercase(),
+            AppRef {
+                name,
+                exe_name: exe,
+                category,
+            },
+        );
     }
     for a in installed {
-        out.entry(a.exe_name.to_ascii_lowercase()).or_insert_with(|| AppRef {
-            name: a.name.clone(),
-            exe_name: a.exe_name.clone(),
-            category: default_category_for(&a.exe_name.to_ascii_lowercase()).to_string(),
-        });
+        out.entry(a.exe_name.to_ascii_lowercase())
+            .or_insert_with(|| AppRef {
+                name: a.name.clone(),
+                exe_name: a.exe_name.clone(),
+                category: default_category_for(&a.exe_name.to_ascii_lowercase()).to_string(),
+            });
     }
     // Browsers are filtered per website; core Windows tools are never blocked.
     out.retain(|k, _| browser_family(k).is_none() && !is_protected_name(k));
@@ -174,7 +204,7 @@ fn domains_in(conn: &Connection, categories: &[String]) -> rusqlite::Result<BTre
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows {
         let (domain, cat) = row?;
-        if categories.iter().any(|x| *x == cat) {
+        if categories.contains(&cat) {
             set.insert(domain);
         } else {
             set.remove(&domain);
@@ -183,10 +213,15 @@ fn domains_in(conn: &Connection, categories: &[String]) -> rusqlite::Result<BTre
     Ok(set)
 }
 
-pub fn resolve(conn: &Connection, p: &Profile, installed: &[InstalledApp]) -> rusqlite::Result<BlockPreview> {
+pub fn resolve(
+    conn: &Connection,
+    p: &Profile,
+    installed: &[InstalledApp],
+) -> rusqlite::Result<BlockPreview> {
     let apps = candidate_apps(conn, installed)?;
     let listed: BTreeSet<String> = p.apps.iter().map(|a| a.to_ascii_lowercase()).collect();
-    let selected = |exe: &String, a: &AppRef| p.categories.iter().any(|c| *c == a.category) || listed.contains(exe);
+    let selected =
+        |exe: &String, a: &AppRef| p.categories.contains(&a.category) || listed.contains(exe);
     let mut sites = domains_in(conn, &p.categories)?;
     sites.extend(p.sites.iter().map(|s| s.to_ascii_lowercase()));
 
@@ -222,31 +257,55 @@ mod tests {
     use chrono::NaiveDate;
 
     fn installed(exe: &str, name: &str) -> InstalledApp {
-        InstalledApp { exe_name: exe.into(), name: name.into(), path: String::new() }
+        InstalledApp {
+            exe_name: exe.into(),
+            name: name.into(),
+            path: String::new(),
+        }
     }
 
     #[test]
     fn builtin_profiles_resolve() {
         let conn = db::open_in_memory().unwrap();
-        let t = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let t = NaiveDate::from_ymd_opt(2026, 11, 18)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
         db::get_or_create_app(&conn, "Code.exe", "", || "VS Code".into(), t).unwrap();
         db::get_or_create_app(&conn, "chrome.exe", "", || "Chrome".into(), t).unwrap();
-        let inst = [installed("steam.exe", "Steam"), installed("Discord.exe", "Discord"), installed("explorer.exe", "Explorer")];
+        let inst = [
+            installed("steam.exe", "Steam"),
+            installed("Discord.exe", "Discord"),
+            installed("explorer.exe", "Explorer"),
+        ];
 
         let all = list(&conn).unwrap();
         let study = all.iter().find(|p| p.name == "Study Mode").unwrap();
         let prev = resolve(&conn, study, &inst).unwrap();
         let names: Vec<&str> = prev.blocked_apps.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["Steam"], "games blocked; Discord (Communication), browsers and Explorer are not");
+        assert_eq!(
+            names,
+            vec!["Steam"],
+            "games blocked; Discord (Communication), browsers and Explorer are not"
+        );
         assert!(prev.blocked_sites.contains(&"youtube.com".to_string()));
         assert!(prev.blocked_sites.contains(&"instagram.com".to_string()));
 
         let deep = all.iter().find(|p| p.name == "Deep Focus").unwrap();
         let prev = resolve(&conn, deep, &inst).unwrap();
-        assert_eq!(prev.allowed_apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), vec!["VS Code"]);
+        assert_eq!(
+            prev.allowed_apps
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["VS Code"]
+        );
         assert!(prev.blocked_apps.iter().any(|a| a.name == "Discord"));
         assert!(prev.allowed_sites.contains(&"github.com".to_string()));
-        assert!(prev.allowed_sites.contains(&"coursera.org".to_string()), "Study category sites are allowed");
+        assert!(
+            prev.allowed_sites.contains(&"coursera.org".to_string()),
+            "Study category sites are allowed"
+        );
     }
 
     #[test]
@@ -271,7 +330,11 @@ mod tests {
         p.mode = "nope".into();
         assert!(save(&conn, &p).is_err());
         // Built-ins can't be deleted.
-        let builtin = list(&conn).unwrap().into_iter().find(|p| p.builtin).unwrap();
+        let builtin = list(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.builtin)
+            .unwrap();
         delete(&conn, builtin.id.unwrap()).unwrap();
         assert!(get(&conn, builtin.id.unwrap()).unwrap().is_some());
     }

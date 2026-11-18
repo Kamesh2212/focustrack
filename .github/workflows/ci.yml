@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly dependency audit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend (TypeScript + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  extension:
+    name: Extension checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate manifest and syntax
+        working-directory: extension
+        run: |
+          node -e "const m=require('./manifest.json'); if(m.manifest_version!==3) throw new Error('MV3 expected'); console.log('manifest', m.version)"
+          node --check background.js
+          node --check blocked.js
+          for f in usage.js popup.js sidepanel.js; do node --input-type=module --check < "$f"; done
+      - name: Versions match
+        run: |
+          app=$(node -p "require('./package.json').version")
+          ext=$(node -p "require('./extension/manifest.json').version")
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "app=$app extension=$ext tauri=$conf"
+          [ "$app" = "$ext" ] && [ "$app" = "$conf" ]
+
+  rust:
+    name: Rust (fmt, clippy, tests) — Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # tauri-build checks that the frontend dist folder exists at compile time.
+      - run: npm ci
+      - run: npm run build
+      - name: rustfmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm audit
+        run: npm audit --audit-level=high
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit (fails on vulnerabilities, not on "unmaintained" notices)
+        working-directory: src-tauri
+        run: cargo audit

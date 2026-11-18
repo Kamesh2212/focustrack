@@ -29,13 +29,46 @@ const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
 /// Never blocked, whatever a profile or limit says.
 pub const PROTECTED: &[&str] = &[
-    "focustrack.exe", "explorer.exe", "taskmgr.exe", "dwm.exe", "csrss.exe", "winlogon.exe", "lsass.exe",
-    "services.exe", "svchost.exe", "smss.exe", "wininit.exe", "fontdrvhost.exe", "sihost.exe", "ctfmon.exe",
-    "runtimebroker.exe", "searchhost.exe", "searchapp.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
-    "textinputhost.exe", "applicationframehost.exe", "lockapp.exe", "systemsettings.exe", "securityhealthsystray.exe",
-    "msedgewebview2.exe", "conhost.exe", "dllhost.exe", "audiodg.exe", "spoolsv.exe", "logonui.exe", "userinit.exe",
-    "consent.exe", "mmc.exe", "regedit.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe",
-    "openconsole.exe", "msiexec.exe",
+    "focustrack.exe",
+    "explorer.exe",
+    "taskmgr.exe",
+    "dwm.exe",
+    "csrss.exe",
+    "winlogon.exe",
+    "lsass.exe",
+    "services.exe",
+    "svchost.exe",
+    "smss.exe",
+    "wininit.exe",
+    "fontdrvhost.exe",
+    "sihost.exe",
+    "ctfmon.exe",
+    "runtimebroker.exe",
+    "searchhost.exe",
+    "searchapp.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+    "textinputhost.exe",
+    "applicationframehost.exe",
+    "lockapp.exe",
+    "systemsettings.exe",
+    "securityhealthsystray.exe",
+    "msedgewebview2.exe",
+    "conhost.exe",
+    "dllhost.exe",
+    "audiodg.exe",
+    "spoolsv.exe",
+    "logonui.exe",
+    "userinit.exe",
+    "consent.exe",
+    "mmc.exe",
+    "regedit.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "windowsterminal.exe",
+    "openconsole.exe",
+    "msiexec.exe",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -60,7 +93,10 @@ pub enum Reason {
 fn own_exe() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()))
+        .and_then(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        })
         .unwrap_or_default()
 }
 
@@ -73,7 +109,9 @@ fn is_protected(exe_lower: &str, pid: u32, own: &str) -> bool {
     if pid <= 4 || pid == std::process::id() || exe_lower == own || is_protected_name(exe_lower) {
         return true;
     }
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()).to_ascii_lowercase();
+    let windir = std::env::var("WINDIR")
+        .unwrap_or_else(|_| r"C:\Windows".into())
+        .to_ascii_lowercase();
     match platform::process_image(pid) {
         Some(path) => path.to_ascii_lowercase().starts_with(&windir),
         // Can't inspect it (elevated/system process): leave it alone.
@@ -82,7 +120,12 @@ fn is_protected(exe_lower: &str, pid: u32, own: &str) -> bool {
 }
 
 /// Why `exe` should be closed right now, if at all.
-pub fn reason_for(blocks: &AppBlocks, exe_lower: &str, is_foreground: bool, now: NaiveDateTime) -> Option<Reason> {
+pub fn reason_for(
+    blocks: &AppBlocks,
+    exe_lower: &str,
+    is_foreground: bool,
+    now: NaiveDateTime,
+) -> Option<Reason> {
     if let Some((name, from)) = blocks.limit.get(exe_lower) {
         if now >= *from {
             return Some(Reason::Limit(name.clone()));
@@ -139,7 +182,8 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                     Ok(b) => b.clone(),
                     Err(_) => continue,
                 };
-                if blocks.limit.is_empty() && blocks.focus.is_empty() && blocks.allow_only.is_none() {
+                if blocks.limit.is_empty() && blocks.focus.is_empty() && blocks.allow_only.is_none()
+                {
                     asked.clear();
                     continue;
                 }
@@ -151,7 +195,9 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
 
                 for (pid, exe) in procs {
                     let lower = exe.to_ascii_lowercase();
-                    let Some(reason) = reason_for(&blocks, &lower, Some(pid) == fg, at) else { continue };
+                    let Some(reason) = reason_for(&blocks, &lower, Some(pid) == fg, at) else {
+                        continue;
+                    };
                     if is_protected(&lower, pid, &own) {
                         continue;
                     }
@@ -159,7 +205,9 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                         None => {
                             platform::close_windows(pid);
                             asked.insert(pid, Instant::now());
-                            let due = notified.get(&lower).map_or(true, |t| t.elapsed() >= NOTIFY_EVERY);
+                            let due = notified
+                                .get(&lower)
+                                .is_none_or(|t| t.elapsed() >= NOTIFY_EVERY);
                             if due {
                                 let (title, body) = message(&reason, blocks.focus_label.as_deref());
                                 notify(&app, &title, &body);
@@ -186,31 +234,56 @@ mod tests {
     use chrono::NaiveDate;
 
     fn at(h: u32, m: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap()
+        NaiveDate::from_ymd_opt(2026, 11, 18)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
     }
 
     #[test]
     fn limit_blocks_only_after_grace() {
         let mut b = AppBlocks::default();
-        b.limit.insert("steam.exe".into(), ("Steam".into(), at(10, 1)));
+        b.limit
+            .insert("steam.exe".into(), ("Steam".into(), at(10, 1)));
         assert_eq!(reason_for(&b, "steam.exe", false, at(10, 0)), None);
-        assert_eq!(reason_for(&b, "steam.exe", false, at(10, 1)), Some(Reason::Limit("Steam".into())));
+        assert_eq!(
+            reason_for(&b, "steam.exe", false, at(10, 1)),
+            Some(Reason::Limit("Steam".into()))
+        );
         assert_eq!(reason_for(&b, "code.exe", true, at(10, 1)), None);
     }
 
     #[test]
     fn allow_only_checks_foreground_and_spares_browsers() {
-        let mut b = AppBlocks::default();
-        b.allow_only = Some(["code.exe".to_string()].into_iter().collect());
+        let b = AppBlocks {
+            allow_only: Some(["code.exe".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
         assert_eq!(reason_for(&b, "code.exe", true, at(9, 0)), None);
-        assert!(matches!(reason_for(&b, "discord.exe", true, at(9, 0)), Some(Reason::NotAllowed(_))));
-        assert_eq!(reason_for(&b, "discord.exe", false, at(9, 0)), None, "background apps are left alone");
-        assert_eq!(reason_for(&b, "chrome.exe", true, at(9, 0)), None, "websites are handled by the extension");
+        assert!(matches!(
+            reason_for(&b, "discord.exe", true, at(9, 0)),
+            Some(Reason::NotAllowed(_))
+        ));
+        assert_eq!(
+            reason_for(&b, "discord.exe", false, at(9, 0)),
+            None,
+            "background apps are left alone"
+        );
+        assert_eq!(
+            reason_for(&b, "chrome.exe", true, at(9, 0)),
+            None,
+            "websites are handled by the extension"
+        );
     }
 
     #[test]
     fn core_windows_tools_are_protected() {
-        for exe in ["explorer.exe", "taskmgr.exe", "focustrack.exe", "svchost.exe"] {
+        for exe in [
+            "explorer.exe",
+            "taskmgr.exe",
+            "focustrack.exe",
+            "svchost.exe",
+        ] {
             assert!(is_protected_name(exe));
         }
         assert!(!is_protected_name("steam.exe"));

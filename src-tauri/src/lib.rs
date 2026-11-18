@@ -1,5 +1,9 @@
 //! FocusTrack desktop app: tray-resident screen time tracker.
 
+// `let out = rows.collect(); out` is deliberate: in edition 2021 returning the
+// iterator directly keeps the prepared statement borrowed past its lifetime.
+#![allow(clippy::let_and_return)]
+
 mod analytics;
 mod blocker;
 mod browser;
@@ -58,7 +62,11 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
     let pause = MenuItem::with_id(
         app,
         "pause",
-        if paused { "Resume tracking" } else { "Pause tracking" },
+        if paused {
+            "Resume tracking"
+        } else {
+            "Pause tracking"
+        },
         true,
         None::<&str>,
     )?;
@@ -103,7 +111,9 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         // A second launch just focuses the running instance (no double tracking).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app)
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -117,17 +127,30 @@ pub fn run() {
 
             let conn = db::open(&db_path)?;
             let settings = db::load_settings(&conn)?;
-            let shared = Arc::new(tracker::Shared::new(settings.paused, settings.idle_threshold_secs));
-            shared.website_tracking.store(settings.website_tracking, Ordering::SeqCst);
-            shared.notifications_enabled.store(settings.notifications_enabled, Ordering::SeqCst);
-            shared.break_reminder_mins.store(settings.break_reminder_mins, Ordering::SeqCst);
+            let shared = Arc::new(tracker::Shared::new(
+                settings.paused,
+                settings.idle_threshold_secs,
+            ));
+            shared
+                .website_tracking
+                .store(settings.website_tracking, Ordering::SeqCst);
+            shared
+                .notifications_enabled
+                .store(settings.notifications_enabled, Ordering::SeqCst);
+            shared
+                .break_reminder_mins
+                .store(settings.break_reminder_mins, Ordering::SeqCst);
             tracker::spawn(db_path.clone(), shared.clone());
             browser::spawn_server(shared.clone(), db_path.clone());
             focus::spawn(app.handle().clone(), db_path.clone(), shared.clone());
             blocker::spawn(app.handle().clone(), shared.clone());
             limits::spawn(app.handle().clone(), db_path, shared.clone());
 
-            app.manage(AppState { db: Mutex::new(conn), shared, data_dir });
+            app.manage(AppState {
+                db: Mutex::new(conn),
+                shared,
+                data_dir,
+            });
             build_tray(app, settings.paused)?;
 
             // Launched at Windows sign-in: stay in the tray.

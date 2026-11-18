@@ -80,7 +80,10 @@ impl Shared {
             reset_requested: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
-            status: Mutex::new(LiveStatus { state: "starting".into(), ..Default::default() }),
+            status: Mutex::new(LiveStatus {
+                state: "starting".into(),
+                ..Default::default()
+            }),
             browsers: Mutex::new(HashMap::new()),
             blocklist: Mutex::new(Vec::new()),
             focus_blocklist: Mutex::new(Vec::new()),
@@ -220,7 +223,7 @@ impl<P: Probe> Tracker<P> {
 
         // Sleep / hibernate / clock change: close everything at the last poll.
         let gap = (now - self.last_tick).num_seconds();
-        if gap > SUSPEND_GAP_SECS || gap < 0 {
+        if !(0..=SUSPEND_GAP_SECS).contains(&gap) {
             let end = self.last_tick.min(now);
             self.close_all(end);
         }
@@ -229,7 +232,10 @@ impl<P: Probe> Tracker<P> {
 
         if self.shared.paused.load(Ordering::SeqCst) {
             self.close_all(now);
-            self.set_status(LiveStatus { state: "paused".into(), ..Default::default() });
+            self.set_status(LiveStatus {
+                state: "paused".into(),
+                ..Default::default()
+            });
             return;
         }
 
@@ -240,7 +246,10 @@ impl<P: Probe> Tracker<P> {
             .unwrap_or(false);
         if lock_screen || self.probe.locked() {
             self.close_all(now);
-            self.set_status(LiveStatus { state: "locked".into(), ..Default::default() });
+            self.set_status(LiveStatus {
+                state: "locked".into(),
+                ..Default::default()
+            });
             return;
         }
 
@@ -263,7 +272,12 @@ impl<P: Probe> Tracker<P> {
                 None => self.idle = self.open_idle(last_input, now),
             }
             let since = self.idle.as_ref().map(|s| db::fmt_time(s.start));
-            self.set_status(LiveStatus { state: "idle".into(), since, idle_secs, ..Default::default() });
+            self.set_status(LiveStatus {
+                state: "idle".into(),
+                since,
+                idle_secs,
+                ..Default::default()
+            });
             self.maybe_flush();
             return;
         }
@@ -279,7 +293,11 @@ impl<P: Probe> Tracker<P> {
                     self.finish(SpanKind::Usage, a.span, now);
                 }
                 self.update_site(None, now);
-                self.set_status(LiveStatus { state: "active".into(), idle_secs, ..Default::default() });
+                self.set_status(LiveStatus {
+                    state: "active".into(),
+                    idle_secs,
+                    ..Default::default()
+                });
             }
             Some(app) => {
                 let same = self
@@ -308,7 +326,11 @@ impl<P: Probe> Tracker<P> {
                         since: Some(db::fmt_time(a.span.start)),
                         idle_secs,
                     },
-                    None => LiveStatus { state: "active".into(), idle_secs, ..Default::default() },
+                    None => LiveStatus {
+                        state: "active".into(),
+                        idle_secs,
+                        ..Default::default()
+                    },
                 };
                 self.set_status(status);
             }
@@ -387,7 +409,11 @@ impl<P: Probe> Tracker<P> {
         };
         match db::insert_website_session(&self.conn, website_id, browser, now) {
             Ok(id) => Some(SiteSpan {
-                span: Span { id, start: now, last: now },
+                span: Span {
+                    id,
+                    start: now,
+                    last: now,
+                },
                 website_id,
                 domain: domain.to_string(),
                 browser: browser.to_string(),
@@ -407,7 +433,14 @@ impl<P: Probe> Tracker<P> {
                 let a = self.active.take().unwrap();
                 self.finish(SpanKind::Usage, a.span.clone(), mid);
                 if let Ok(id) = db::insert_usage(&self.conn, a.app_id, mid) {
-                    self.active = Some(ActiveSpan { span: Span { id, start: mid, last: now }, ..a });
+                    self.active = Some(ActiveSpan {
+                        span: Span {
+                            id,
+                            start: mid,
+                            last: now,
+                        },
+                        ..a
+                    });
                 }
             }
         }
@@ -422,8 +455,17 @@ impl<P: Probe> Tracker<P> {
             if w.span.start < mid {
                 let w = self.site.take().unwrap();
                 self.finish(SpanKind::Website, w.span.clone(), mid);
-                if let Ok(id) = db::insert_website_session(&self.conn, w.website_id, &w.browser, mid) {
-                    self.site = Some(SiteSpan { span: Span { id, start: mid, last: now }, ..w });
+                if let Ok(id) =
+                    db::insert_website_session(&self.conn, w.website_id, &w.browser, mid)
+                {
+                    self.site = Some(SiteSpan {
+                        span: Span {
+                            id,
+                            start: mid,
+                            last: now,
+                        },
+                        ..w
+                    });
                 }
             }
         }
@@ -460,7 +502,11 @@ impl<P: Probe> Tracker<P> {
         };
         match db::insert_usage(&self.conn, app_id, now) {
             Ok(id) => Some(ActiveSpan {
-                span: Span { id, start: now, last: now },
+                span: Span {
+                    id,
+                    start: now,
+                    last: now,
+                },
                 app_id,
                 exe: app.exe_name.clone(),
                 name,
@@ -474,7 +520,11 @@ impl<P: Probe> Tracker<P> {
 
     fn open_idle(&mut self, start: NaiveDateTime, now: NaiveDateTime) -> Option<Span> {
         match db::insert_idle(&self.conn, start) {
-            Ok(id) => Some(Span { id, start, last: now }),
+            Ok(id) => Some(Span {
+                id,
+                start,
+                last: now,
+            }),
             Err(e) => {
                 eprintln!("[tracker] insert idle failed: {e}");
                 None
@@ -495,17 +545,29 @@ impl<P: Probe> Tracker<P> {
 
     fn maybe_flush(&mut self) {
         self.ticks += 1;
-        if self.ticks % FLUSH_EVERY_TICKS != 0 {
+        if !self.ticks.is_multiple_of(FLUSH_EVERY_TICKS) {
             return;
         }
         if let Some(a) = &self.active {
-            let _ = db::update_span(&self.conn, SpanKind::Usage, a.span.id, a.span.start, a.span.last);
+            let _ = db::update_span(
+                &self.conn,
+                SpanKind::Usage,
+                a.span.id,
+                a.span.start,
+                a.span.last,
+            );
         }
         if let Some(s) = &self.idle {
             let _ = db::update_span(&self.conn, SpanKind::Idle, s.id, s.start, s.last);
         }
         if let Some(w) = &self.site {
-            let _ = db::update_span(&self.conn, SpanKind::Website, w.span.id, w.span.start, w.span.last);
+            let _ = db::update_span(
+                &self.conn,
+                SpanKind::Website,
+                w.span.id,
+                w.span.start,
+                w.span.last,
+            );
         }
     }
 
@@ -530,7 +592,10 @@ mod tests {
 
     impl Probe for Fake {
         fn foreground(&mut self) -> Option<ForegroundApp> {
-            self.app.map(|n| ForegroundApp { exe_name: n.into(), exe_path: format!("C:\\{n}") })
+            self.app.map(|n| ForegroundApp {
+                exe_name: n.into(),
+                exe_path: format!("C:\\{n}"),
+            })
         }
         fn idle_seconds(&mut self) -> u64 {
             self.idle
@@ -544,12 +609,20 @@ mod tests {
     }
 
     fn at(d: u32, h: u32, m: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, s).unwrap()
+        NaiveDate::from_ymd_opt(2026, 11, d)
+            .unwrap()
+            .and_hms_opt(h, m, s)
+            .unwrap()
     }
 
     fn setup(start: NaiveDateTime) -> Tracker<Fake> {
         let conn = db::open_in_memory().unwrap();
-        Tracker::new(conn, Arc::new(Shared::new(false, 300)), Fake::default(), start)
+        Tracker::new(
+            conn,
+            Arc::new(Shared::new(false, 300)),
+            Fake::default(),
+            start,
+        )
     }
 
     /// Runs one tick per second from `from` to `to` inclusive.
@@ -579,7 +652,11 @@ mod tests {
 
     fn idle_total(t: &Tracker<Fake>) -> i64 {
         t.conn
-            .query_row("SELECT COALESCE(SUM(duration_secs),0) FROM idle_periods", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(duration_secs),0) FROM idle_periods",
+                [],
+                |r| r.get(0),
+            )
             .unwrap()
     }
 
@@ -671,7 +748,11 @@ mod tests {
     fn report(t: &Tracker<Fake>, browser: &str, domain: Option<&str>, at: NaiveDateTime) {
         t.shared.browsers.lock().unwrap().insert(
             browser.into(),
-            BrowserReport { domain: domain.map(String::from), focused: true, at },
+            BrowserReport {
+                domain: domain.map(String::from),
+                focused: true,
+                at,
+            },
         );
     }
 
@@ -751,6 +832,9 @@ mod tests {
         run(&mut t, at(18, 9, 0, 0), at(18, 9, 0, 59));
         // No close_all: simulates a crash. At most FLUSH_EVERY_TICKS lost.
         let secs = usage(&t)[0].2;
-        assert!(secs >= 59 - FLUSH_EVERY_TICKS as i64 && secs <= 59, "got {secs}");
+        assert!(
+            secs >= 59 - FLUSH_EVERY_TICKS as i64 && secs <= 59,
+            "got {secs}"
+        );
     }
 }

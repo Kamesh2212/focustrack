@@ -13,8 +13,8 @@ pub struct ForegroundApp {
 }
 
 pub use imp::{
-    close_windows, file_description, foreground_app, foreground_pid, idle_seconds, is_session_locked, process_image,
-    processes, terminate,
+    close_windows, file_description, foreground_app, foreground_pid, idle_seconds,
+    is_session_locked, process_image, processes, terminate,
 };
 
 /// Returns the last path component (`C:\a\b.exe` -> `b.exe`).
@@ -46,25 +46,27 @@ mod imp {
     use super::{file_name, ForegroundApp};
     use std::ffi::c_void;
     use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::StationsAndDesktops::{
         CloseDesktop, OpenInputDesktop, SwitchDesktop,
     };
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-    };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-        WM_CLOSE,
+        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
+        IsWindowVisible, PostMessageW, WM_CLOSE,
     };
 
     const PROCESS_TERMINATE: u32 = 0x0001;
@@ -81,8 +83,15 @@ mod imp {
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             let mut ok = Process32FirstW(snap, &mut entry) != 0;
             while ok {
-                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
-                out.push((entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile[..len])));
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                out.push((
+                    entry.th32ProcessID,
+                    String::from_utf16_lossy(&entry.szExeFile[..len]),
+                ));
                 ok = Process32NextW(snap, &mut entry) != 0;
             }
             CloseHandle(snap);
@@ -188,7 +197,10 @@ mod imp {
     /// Store/UWP apps are hosted by ApplicationFrameHost.exe; the real app
     /// owns a child window of the frame.
     unsafe fn uwp_child_path(hwnd: HWND, host_pid: u32) -> Option<String> {
-        let mut search = ChildSearch { host_pid, found_pid: 0 };
+        let mut search = ChildSearch {
+            host_pid,
+            found_pid: 0,
+        };
         EnumChildWindows(
             hwnd,
             Some(enum_child),
@@ -286,7 +298,8 @@ mod imp {
                 ));
                 let mut p: *mut c_void = null_mut();
                 let mut l = 0u32;
-                if VerQueryValueW(block, key.as_ptr(), &mut p, &mut l) != 0 && !p.is_null() && l > 0 {
+                if VerQueryValueW(block, key.as_ptr(), &mut p, &mut l) != 0 && !p.is_null() && l > 0
+                {
                     let chars = std::slice::from_raw_parts(p as *const u16, l as usize);
                     let text = String::from_utf16_lossy(chars)
                         .trim_end_matches('\0')

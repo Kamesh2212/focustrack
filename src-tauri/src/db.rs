@@ -271,7 +271,9 @@ fn migrate_v4(conn: &Connection) -> rusqlite::Result<()> {
          COMMIT;",
     )?;
     // Move built-in study tools from Education to Study, unless the user changed them.
-    let study: i64 = conn.query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| r.get(0))?;
+    let study: i64 = conn.query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| {
+        r.get(0)
+    })?;
     for exe in crate::categories::STUDY_EXES {
         conn.execute(
             "UPDATE applications SET category_id = ?1
@@ -335,7 +337,9 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<StoredSettings> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let website_tracking = get_setting(conn, "website_tracking")?.as_deref() != Some("0");
-    let overrides_per_day = get_setting(conn, "overrides_per_day")?.and_then(|v| v.parse().ok()).unwrap_or(1);
+    let overrides_per_day = get_setting(conn, "overrides_per_day")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let goal_reminder = get_setting(conn, "goal_reminder")?.unwrap_or_else(|| "20:00".into());
     Ok(StoredSettings {
         overrides_per_day,
@@ -381,9 +385,17 @@ pub fn get_or_create_app(
 }
 
 /// Looks up a website by domain, creating it with a default category.
-pub fn get_or_create_website(conn: &Connection, domain: &str, now: NaiveDateTime) -> rusqlite::Result<i64> {
+pub fn get_or_create_website(
+    conn: &Connection,
+    domain: &str,
+    now: NaiveDateTime,
+) -> rusqlite::Result<i64> {
     if let Some(id) = conn
-        .query_row("SELECT id FROM websites WHERE domain = ?1", params![domain], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM websites WHERE domain = ?1",
+            params![domain],
+            |r| r.get(0),
+        )
         .optional()?
     {
         return Ok(id);
@@ -472,7 +484,10 @@ pub fn update_span(
 }
 
 pub fn delete_span(conn: &Connection, kind: SpanKind, id: i64) -> rusqlite::Result<()> {
-    conn.execute(&format!("DELETE FROM {} WHERE id = ?1", kind.table()), params![id])?;
+    conn.execute(
+        &format!("DELETE FROM {} WHERE id = ?1", kind.table()),
+        params![id],
+    )?;
     Ok(())
 }
 
@@ -516,7 +531,10 @@ pub fn delete_usage_before(conn: &Connection, day: &str) -> rusqlite::Result<usi
     let b = conn.execute("DELETE FROM idle_periods WHERE day < ?1", params![day])?;
     let c = conn.execute("DELETE FROM website_sessions WHERE day < ?1", params![day])?;
     conn.execute("DELETE FROM focus_sessions WHERE day < ?1", params![day])?;
-    conn.execute("DELETE FROM sent_notifications WHERE day < ?1", params![day])?;
+    conn.execute(
+        "DELETE FROM sent_notifications WHERE day < ?1",
+        params![day],
+    )?;
     Ok(a + b + c)
 }
 
@@ -526,26 +544,43 @@ mod tests {
     use chrono::NaiveDate;
 
     fn t(h: u32, m: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, s).unwrap()
+        NaiveDate::from_ymd_opt(2026, 11, 18)
+            .unwrap()
+            .and_hms_opt(h, m, s)
+            .unwrap()
     }
 
     #[test]
     fn migration_seeds_categories_and_is_idempotent() {
         let conn = open_in_memory().unwrap();
         migrate(&conn).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n as usize, DEFAULT_CATEGORIES.len());
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, 4);
-        let profiles: i64 = conn.query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0)).unwrap();
+        let profiles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(profiles, 4);
     }
 
     #[test]
     fn app_created_once_with_default_category() {
         let conn = open_in_memory().unwrap();
-        let (a, name) = get_or_create_app(&conn, "Code.exe", "C:\\x\\Code.exe", || "VS Code".into(), t(9, 0, 0)).unwrap();
-        let (b, _) = get_or_create_app(&conn, "code.exe", "", || "ignored".into(), t(9, 0, 0)).unwrap();
+        let (a, name) = get_or_create_app(
+            &conn,
+            "Code.exe",
+            "C:\\x\\Code.exe",
+            || "VS Code".into(),
+            t(9, 0, 0),
+        )
+        .unwrap();
+        let (b, _) =
+            get_or_create_app(&conn, "code.exe", "", || "ignored".into(), t(9, 0, 0)).unwrap();
         assert_eq!(a, b);
         assert_eq!(name, "VS Code");
         let cat: String = conn
@@ -566,7 +601,11 @@ mod tests {
         update_span(&conn, SpanKind::Usage, id, t(9, 0, 0), t(9, 0, 30)).unwrap();
         update_span(&conn, SpanKind::Usage, id, t(9, 0, 0), t(9, 1, 0)).unwrap();
         let (count, secs): (i64, i64) = conn
-            .query_row("SELECT COUNT(*), SUM(duration_secs) FROM usage_sessions", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                "SELECT COUNT(*), SUM(duration_secs) FROM usage_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!((count, secs), (1, 60));
     }

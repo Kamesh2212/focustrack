@@ -5,6 +5,7 @@
 //!   * `notify`          — notifications at the warning level and at the limit
 //!   * `block`           — block as soon as the limit is reached
 //!   * `warn_then_block` — warning notification, then a 1-minute heads-up, then block
+//!
 //! Apps are blocked by `blocker.rs`, websites by the browser extension. A limit
 //! can be extended by 15 minutes a few times a day (configurable).
 
@@ -120,7 +121,10 @@ pub fn override_limit(conn: &Connection, id: i64, day: &str, per_day: i64) -> Re
         return Err(if per_day == 0 {
             "Extending limits is turned off in Settings".into()
         } else {
-            format!("You've used all {per_day} extension{} for today", if per_day == 1 { "" } else { "s" })
+            format!(
+                "You've used all {per_day} extension{} for today",
+                if per_day == 1 { "" } else { "s" }
+            )
         });
     }
     conn.execute(
@@ -153,7 +157,11 @@ pub fn enforcement_times(
             continue;
         }
         let reached = *first_reached.entry(key).or_insert(now);
-        let from = if l.action == "warn_then_block" { reached + Duration::seconds(GRACE_SECS) } else { reached };
+        let from = if l.action == "warn_then_block" {
+            reached + Duration::seconds(GRACE_SECS)
+        } else {
+            reached
+        };
         out.push((l.clone(), from));
     }
     out
@@ -178,8 +186,15 @@ fn fmt(secs: i64) -> String {
 /// The notification each limit currently calls for.
 pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
     let mut out = Vec::new();
-    for l in limits.iter().filter(|l| l.enabled && l.daily_limit_secs > 0) {
-        let kind = if l.target_type == "app" { "app" } else { "site" };
+    for l in limits
+        .iter()
+        .filter(|l| l.enabled && l.daily_limit_secs > 0)
+    {
+        let kind = if l.target_type == "app" {
+            "app"
+        } else {
+            "site"
+        };
         if l.exceeded() {
             let (title, body) = match l.action.as_str() {
                 "notify" => (
@@ -195,7 +210,11 @@ pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
                     format!("You've reached your {} limit for {}.", fmt(l.allowed_secs()), l.name),
                 ),
             };
-            out.push(Notice { key: format!("limit:{}:exceeded", l.id), title, body });
+            out.push(Notice {
+                key: format!("limit:{}:exceeded", l.id),
+                title,
+                body,
+            });
         } else if l.warned() && l.action != "block" {
             out.push(Notice {
                 key: format!("limit:{}:warn", l.id),
@@ -213,7 +232,11 @@ pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
 }
 
 /// "You've been using your computer for 2h" once per continuous session.
-pub fn break_notice(spans: &[(NaiveDateTime, NaiveDateTime)], now: NaiveDateTime, reminder_mins: u64) -> Option<Notice> {
+pub fn break_notice(
+    spans: &[(NaiveDateTime, NaiveDateTime)],
+    now: NaiveDateTime,
+    reminder_mins: u64,
+) -> Option<Notice> {
     if reminder_mins == 0 || spans.is_empty() {
         return None;
     }
@@ -233,12 +256,19 @@ pub fn break_notice(spans: &[(NaiveDateTime, NaiveDateTime)], now: NaiveDateTime
     Some(Notice {
         key: format!("break:{}", db::fmt_time(start)),
         title: "Time for a break?".into(),
-        body: format!("You've been using your computer for {} without a break.", fmt(length)),
+        body: format!(
+            "You've been using your computer for {} without a break.",
+            fmt(length)
+        ),
     })
 }
 
 /// Evening reminder listing goals that aren't done yet.
-pub fn goal_reminder(goals: &[crate::goals::GoalStatus], now: NaiveDateTime, at: &str) -> Option<Notice> {
+pub fn goal_reminder(
+    goals: &[crate::goals::GoalStatus],
+    now: NaiveDateTime,
+    at: &str,
+) -> Option<Notice> {
     let time = NaiveTime::parse_from_str(at, "%H:%M").ok()?;
     if now.time() < time {
         return None;
@@ -251,11 +281,24 @@ pub fn goal_reminder(goals: &[crate::goals::GoalStatus], now: NaiveDateTime, at:
     if pending.is_empty() {
         return None;
     }
-    let shown = pending.iter().take(3).copied().collect::<Vec<_>>().join(" · ");
-    let more = if pending.len() > 3 { format!(" and {} more", pending.len() - 3) } else { String::new() };
+    let shown = pending
+        .iter()
+        .take(3)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let more = if pending.len() > 3 {
+        format!(" and {} more", pending.len() - 3)
+    } else {
+        String::new()
+    };
     Some(Notice {
         key: "goals:reminder".into(),
-        title: format!("{} goal{} left today", pending.len(), if pending.len() == 1 { "" } else { "s" }),
+        title: format!(
+            "{} goal{} left today",
+            pending.len(),
+            if pending.len() == 1 { "" } else { "s" }
+        ),
         body: format!("{shown}{more}"),
     })
 }
@@ -294,12 +337,15 @@ fn check(
     if let Ok(mut b) = shared.app_blocks.lock() {
         b.limit = enforced
             .iter()
-            .filter(|(l, _)| l.target_type == "app" && !blocker::is_protected_name(&l.key.to_ascii_lowercase()))
+            .filter(|(l, _)| {
+                l.target_type == "app" && !blocker::is_protected_name(&l.key.to_ascii_lowercase())
+            })
             .map(|(l, from)| (l.key.to_ascii_lowercase(), (l.name.clone(), *from)))
             .collect();
     }
 
-    if !shared.notifications_enabled.load(Ordering::SeqCst) || shared.paused.load(Ordering::SeqCst) {
+    if !shared.notifications_enabled.load(Ordering::SeqCst) || shared.paused.load(Ordering::SeqCst)
+    {
         return Ok(());
     }
     let mut notices = limit_notices(&limits);
@@ -312,7 +358,11 @@ fn check(
     let settings = db::load_settings(conn)?;
     notices.extend(goal_reminder(&goals, now, &settings.goal_reminder));
     let spans = analytics::active_spans(conn, &day, &day)?;
-    notices.extend(break_notice(&spans, now, shared.break_reminder_mins.load(Ordering::SeqCst)));
+    notices.extend(break_notice(
+        &spans,
+        now,
+        shared.break_reminder_mins.load(Ordering::SeqCst),
+    ));
     for n in notices {
         if db::mark_notified(conn, &n.key, &day)? {
             notify(app, &n.title, &n.body);
@@ -357,7 +407,10 @@ mod tests {
     use chrono::NaiveDate;
 
     fn at(h: u32, m: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap()
+        NaiveDate::from_ymd_opt(2026, 11, 18)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
     }
 
     fn limit(kind: &str, used: i64, limit: i64, action: &str) -> LimitStatus {
@@ -384,26 +437,51 @@ mod tests {
         let warn = limit_notices(&[limit("website", 2900, 3600, "notify")]);
         assert_eq!(warn[0].key, "limit:7:warn");
         assert!(warn[0].body.contains("48m used of 1h"), "{}", warn[0].body);
-        assert!(limit_notices(&[limit("website", 2900, 3600, "block")]).is_empty(), "block: no early warning");
-        assert_eq!(limit_notices(&[limit("app", 2900, 3600, "warn_then_block")])[0].key, "limit:7:warn");
+        assert!(
+            limit_notices(&[limit("website", 2900, 3600, "block")]).is_empty(),
+            "block: no early warning"
+        );
+        assert_eq!(
+            limit_notices(&[limit("app", 2900, 3600, "warn_then_block")])[0].key,
+            "limit:7:warn"
+        );
         let over = limit_notices(&[limit("app", 3600, 3600, "warn_then_block")]);
         assert!(over[0].title.contains("closes in 1 minute"));
-        assert!(limit_notices(&[limit("app", 3600, 3600, "block")])[0].title.contains("blocked"));
+        assert!(limit_notices(&[limit("app", 3600, 3600, "block")])[0]
+            .title
+            .contains("blocked"));
     }
 
     #[test]
     fn enforcement_waits_for_grace_and_respects_overrides() {
         let mut first = HashMap::new();
-        let ls = [limit("app", 3700, 3600, "warn_then_block"), limit("app", 3700, 3600, "notify")];
+        let ls = [
+            limit("app", 3700, 3600, "warn_then_block"),
+            limit("app", 3700, 3600, "notify"),
+        ];
         let e = enforcement_times(&ls, &mut first, at(10, 0));
         assert_eq!(e.len(), 1, "notify-only limits never block");
         assert_eq!(e[0].1, at(10, 1));
         // Next check keeps the original reach time.
-        assert_eq!(enforcement_times(&ls, &mut first, at(10, 0) + Duration::seconds(15))[0].1, at(10, 1));
+        assert_eq!(
+            enforcement_times(&ls, &mut first, at(10, 0) + Duration::seconds(15))[0].1,
+            at(10, 1)
+        );
         // An override (+15 min) un-blocks until the new allowance is used.
-        let extended = LimitStatus { extra_secs: 900, ..ls[0].clone() };
+        let extended = LimitStatus {
+            extra_secs: 900,
+            ..ls[0].clone()
+        };
         assert!(enforcement_times(&[extended], &mut first, at(10, 2)).is_empty());
-        assert_eq!(enforcement_times(&[limit("app", 3600, 3600, "block")], &mut HashMap::new(), at(11, 0))[0].1, at(11, 0));
+        assert_eq!(
+            enforcement_times(
+                &[limit("app", 3600, 3600, "block")],
+                &mut HashMap::new(),
+                at(11, 0)
+            )[0]
+            .1,
+            at(11, 0)
+        );
     }
 
     #[test]
@@ -411,10 +489,18 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         override_limit(&conn, 1, "2026-11-18", 2).unwrap();
         override_limit(&conn, 2, "2026-11-18", 2).unwrap();
-        assert!(override_limit(&conn, 1, "2026-11-18", 2).unwrap_err().contains("all 2"));
-        assert!(override_limit(&conn, 1, "2026-11-18", 0).unwrap_err().contains("turned off"));
+        assert!(override_limit(&conn, 1, "2026-11-18", 2)
+            .unwrap_err()
+            .contains("all 2"));
+        assert!(override_limit(&conn, 1, "2026-11-18", 0)
+            .unwrap_err()
+            .contains("turned off"));
         let extra: i64 = conn
-            .query_row("SELECT extra_secs FROM limit_overrides WHERE limit_id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT extra_secs FROM limit_overrides WHERE limit_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(extra, 900);
     }
@@ -434,7 +520,8 @@ mod tests {
     #[test]
     fn status_query_sums_today_with_overrides() {
         let conn = db::open_in_memory().unwrap();
-        let (app, _) = db::get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), at(9, 0)).unwrap();
+        let (app, _) =
+            db::get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), at(9, 0)).unwrap();
         let id = db::insert_usage(&conn, app, at(9, 0)).unwrap();
         db::update_span(&conn, db::SpanKind::Usage, id, at(9, 0), at(9, 30)).unwrap();
         conn.execute(
@@ -443,7 +530,10 @@ mod tests {
         )
         .unwrap();
         let ls = limit_status(&conn, "2026-11-18").unwrap();
-        assert_eq!((ls[0].name.as_str(), ls[0].key.as_str(), ls[0].used_secs), ("Steam", "steam.exe", 1800));
+        assert_eq!(
+            (ls[0].name.as_str(), ls[0].key.as_str(), ls[0].used_secs),
+            ("Steam", "steam.exe", 1800)
+        );
         assert!(ls[0].exceeded());
         override_limit(&conn, ls[0].id, "2026-11-18", 1).unwrap();
         let ls = limit_status(&conn, "2026-11-18").unwrap();

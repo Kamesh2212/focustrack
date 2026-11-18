@@ -104,7 +104,12 @@ fn summary(conn: &rusqlite::Connection, shared: &Shared) -> rusqlite::Result<Sum
             .into_iter()
             .filter(|a| a.secs > 0)
             .take(8)
-            .map(|a| AppRow { name: a.name, category: a.category, color: a.color, secs: a.secs })
+            .map(|a| AppRow {
+                name: a.name,
+                category: a.category,
+                color: a.color,
+                secs: a.secs,
+            })
             .collect(),
         productive_secs: productive,
         distracting_secs: distracting,
@@ -116,10 +121,21 @@ fn summary(conn: &rusqlite::Connection, shared: &Shared) -> rusqlite::Result<Sum
             .into_iter()
             .filter(|s| s.secs > 0)
             .take(8)
-            .map(|s| SiteRow { domain: s.domain, category: s.category, color: s.color, secs: s.secs })
+            .map(|s| SiteRow {
+                domain: s.domain,
+                category: s.category,
+                color: s.color,
+                secs: s.secs,
+            })
             .collect(),
-        limits: crate::limits::limit_status(conn, &day)?.into_iter().filter(|l| l.enabled).collect(),
-        goals: crate::goals::goal_status(conn, &day)?.into_iter().filter(|g| g.enabled).collect(),
+        limits: crate::limits::limit_status(conn, &day)?
+            .into_iter()
+            .filter(|l| l.enabled)
+            .collect(),
+        goals: crate::goals::goal_status(conn, &day)?
+            .into_iter()
+            .filter(|g| g.enabled)
+            .collect(),
         focus: crate::focus::status(shared),
         focus_today_secs: focus_secs,
         date: day,
@@ -133,15 +149,20 @@ pub fn normalize_domain(raw: &str) -> Option<String> {
     let d = d.strip_prefix("www.").unwrap_or(&d).to_string();
     let valid = !d.is_empty()
         && d.len() <= 253
-        && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && d.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         && !d.starts_with('.')
         && !d.contains("..");
     valid.then_some(d)
 }
 
 fn json_response(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
-    let ct: Header = "Content-Type: application/json".parse().expect("static header");
-    Response::from_string(body).with_status_code(status).with_header(ct)
+    let ct: Header = "Content-Type: application/json"
+        .parse()
+        .expect("static header");
+    Response::from_string(body)
+        .with_status_code(status)
+        .with_header(ct)
 }
 
 fn header(req: &Request, name: &'static str) -> Option<String> {
@@ -157,12 +178,13 @@ fn now() -> NaiveDateTime {
 }
 
 fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>) {
-    let origin_ok = header(&req, "Origin").map_or(true, |o| {
-        o.starts_with("chrome-extension://") || o.starts_with("moz-extension://") || o.starts_with("extension://")
+    let origin_ok = header(&req, "Origin").is_none_or(|o| {
+        o.starts_with("chrome-extension://")
+            || o.starts_with("moz-extension://")
+            || o.starts_with("extension://")
     });
-    let host_ok = header(&req, "Host").map_or(false, |h| {
-        h == format!("127.0.0.1:{PORT}") || h == format!("localhost:{PORT}")
-    });
+    let host_ok = header(&req, "Host")
+        .is_some_and(|h| h == format!("127.0.0.1:{PORT}") || h == format!("localhost:{PORT}"));
     #[cfg(debug_assertions)]
     eprintln!(
         "[browser] {} {} origin={:?} ok={}",
@@ -199,7 +221,10 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 .and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string()));
             let _ = match body {
                 Ok(b) => req.respond(json_response(200, b)),
-                Err(e) => req.respond(json_response(500, serde_json::json!({ "error": e }).to_string())),
+                Err(e) => req.respond(json_response(
+                    500,
+                    serde_json::json!({ "error": e }).to_string(),
+                )),
             };
         }
         (Method::Post, "/v1/goals/toggle") | (Method::Post, "/v1/notes") => {
@@ -208,36 +233,68 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 return;
             }
             let mut body = String::new();
-            if req.as_reader().take(32 * 1024).read_to_string(&mut body).is_err() {
+            if req
+                .as_reader()
+                .take(32 * 1024)
+                .read_to_string(&mut body)
+                .is_err()
+            {
                 let _ = req.respond(json_response(400, r#"{"error":"bad body"}"#.into()));
                 return;
             }
             let Some(conn) = conn else {
-                let _ = req.respond(json_response(500, r#"{"error":"database unavailable"}"#.into()));
+                let _ = req.respond(json_response(
+                    500,
+                    r#"{"error":"database unavailable"}"#.into(),
+                ));
                 return;
             };
             let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             let result = if url == "/v1/notes" {
-                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+                let text = v
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if text.is_empty() {
                     Err("empty note".to_string())
                 } else {
-                    let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
-                    let session = shared.focus.lock().ok().and_then(|f| f.as_ref().map(|a| a.session_id));
-                    crate::notes::create(conn, crate::notes::QUICK_NOTEBOOK, &title, &text, session, now())
-                        .map(|n| serde_json::json!({ "id": n.id }))
+                    let title: String =
+                        text.lines().next().unwrap_or("").chars().take(60).collect();
+                    let session = shared
+                        .focus
+                        .lock()
+                        .ok()
+                        .and_then(|f| f.as_ref().map(|a| a.session_id));
+                    crate::notes::create(
+                        conn,
+                        crate::notes::QUICK_NOTEBOOK,
+                        &title,
+                        &text,
+                        session,
+                        now(),
+                    )
+                    .map(|n| serde_json::json!({ "id": n.id }))
                 }
             } else {
                 match v.get("id").and_then(|i| i.as_i64()) {
-                    Some(id) => crate::goals::toggle_check(conn, id, &crate::analytics::fmt_day(now().date()))
-                        .map(|done| serde_json::json!({ "done": done }))
-                        .map_err(|e| e.to_string()),
+                    Some(id) => crate::goals::toggle_check(
+                        conn,
+                        id,
+                        &crate::analytics::fmt_day(now().date()),
+                    )
+                    .map(|done| serde_json::json!({ "done": done }))
+                    .map_err(|e| e.to_string()),
                     None => Err("missing id".to_string()),
                 }
             };
             let _ = match result {
                 Ok(v) => req.respond(json_response(200, v.to_string())),
-                Err(e) => req.respond(json_response(400, serde_json::json!({ "error": e }).to_string())),
+                Err(e) => req.respond(json_response(
+                    400,
+                    serde_json::json!({ "error": e }).to_string(),
+                )),
             };
         }
         (Method::Post, "/v1/heartbeat") => {
@@ -246,7 +303,12 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 return;
             }
             let mut body = String::new();
-            if req.as_reader().take(16 * 1024).read_to_string(&mut body).is_err() {
+            if req
+                .as_reader()
+                .take(16 * 1024)
+                .read_to_string(&mut body)
+                .is_err()
+            {
                 let _ = req.respond(json_response(400, r#"{"error":"bad body"}"#.into()));
                 return;
             }
@@ -264,15 +326,27 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
             let tracking = shared.website_tracking.load(Ordering::SeqCst);
             if let Ok(mut map) = shared.browsers.lock() {
                 let report = BrowserReport {
-                    domain: if tracking { beat.domain.as_deref().and_then(normalize_domain) } else { None },
+                    domain: if tracking {
+                        beat.domain.as_deref().and_then(normalize_domain)
+                    } else {
+                        None
+                    },
                     focused: beat.focused,
                     at: now(),
                 };
                 map.insert(beat.browser, report);
             }
-            let blocked = shared.blocklist.lock().map(|b| b.clone()).unwrap_or_default();
+            let blocked = shared
+                .blocklist
+                .lock()
+                .map(|b| b.clone())
+                .unwrap_or_default();
             let focus = crate::focus::status(shared);
-            let focus_blocked = shared.focus_blocklist.lock().map(|b| b.clone()).unwrap_or_default();
+            let focus_blocked = shared
+                .focus_blocklist
+                .lock()
+                .map(|b| b.clone())
+                .unwrap_or_default();
             let allow_only = shared.focus_allow_sites.lock().ok().and_then(|b| b.clone());
             let reply = HeartbeatReply {
                 tracking,
@@ -281,7 +355,10 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 focus_allow_only: allow_only.as_deref(),
                 focus_ends_at: focus.map(|f| f.plan_ends_at),
             };
-            let _ = req.respond(json_response(200, serde_json::to_string(&reply).unwrap_or_default()));
+            let _ = req.respond(json_response(
+                200,
+                serde_json::to_string(&reply).unwrap_or_default(),
+            ));
         }
         // No CORS headers: web pages' preflights fail, which is the point.
         (Method::Options, _) => {
@@ -305,7 +382,9 @@ pub fn spawn_server(shared: Arc<Shared>, db_path: std::path::PathBuf) {
                 }
             };
             shared.server_running.store(true, Ordering::SeqCst);
-            let conn = crate::db::open(&db_path).map_err(|e| eprintln!("[browser] database: {e}")).ok();
+            let conn = crate::db::open(&db_path)
+                .map_err(|e| eprintln!("[browser] database: {e}"))
+                .ok();
             for req in server.incoming_requests() {
                 handle(req, &shared, conn.as_ref());
             }
@@ -320,8 +399,14 @@ mod tests {
 
     #[test]
     fn domains_are_normalized() {
-        assert_eq!(normalize_domain("WWW.YouTube.com").as_deref(), Some("youtube.com"));
-        assert_eq!(normalize_domain("github.com.").as_deref(), Some("github.com"));
+        assert_eq!(
+            normalize_domain("WWW.YouTube.com").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(
+            normalize_domain("github.com.").as_deref(),
+            Some("github.com")
+        );
         assert_eq!(normalize_domain("localhost").as_deref(), Some("localhost"));
         assert_eq!(normalize_domain(""), None);
         assert_eq!(normalize_domain("evil.com/path"), None);

@@ -2,8 +2,8 @@
 
 use crate::analytics::{self as an, AppUsage, CategoryUsage, DayTotal, SiteUsage};
 use crate::browser;
-use crate::limits::{self, LimitStatus};
 use crate::db;
+use crate::limits::{self, LimitStatus};
 use crate::tracker::LiveStatus;
 use crate::{AppState, TrayPause};
 use chrono::{Datelike, Duration, Local, Weekday};
@@ -123,7 +123,12 @@ pub fn get_categories(state: State<'_, AppState>) -> CmdResult<Vec<Category>> {
         .map_err(err)?;
     let rows = stmt
         .query_map([], |r| {
-            Ok(Category { id: r.get(0)?, name: r.get(1)?, color: r.get(2)?, kind: r.get(3)? })
+            Ok(Category {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                color: r.get(2)?,
+                kind: r.get(3)?,
+            })
         })
         .map_err(err)?;
     let out: Result<Vec<_>, _> = rows.collect();
@@ -131,7 +136,11 @@ pub fn get_categories(state: State<'_, AppState>) -> CmdResult<Vec<Category>> {
 }
 
 #[tauri::command]
-pub fn set_app_category(state: State<'_, AppState>, app_id: i64, category_id: Option<i64>) -> CmdResult<()> {
+pub fn set_app_category(
+    state: State<'_, AppState>,
+    app_id: i64,
+    category_id: Option<i64>,
+) -> CmdResult<()> {
     let conn = conn!(state);
     conn.execute(
         "UPDATE applications SET category_id = ?1 WHERE id = ?2",
@@ -148,8 +157,11 @@ pub fn rename_app(state: State<'_, AppState>, app_id: i64, name: String) -> CmdR
         return Err("Name cannot be empty".into());
     }
     let conn = conn!(state);
-    conn.execute("UPDATE applications SET display_name = ?1 WHERE id = ?2", params![name, app_id])
-        .map_err(err)?;
+    conn.execute(
+        "UPDATE applications SET display_name = ?1 WHERE id = ?2",
+        params![name, app_id],
+    )
+    .map_err(err)?;
     Ok(())
 }
 
@@ -291,7 +303,11 @@ fn query_history(
     search: &str,
     limit: i64,
 ) -> rusqlite::Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare(if websites { SITE_HISTORY_SQL } else { HISTORY_SQL })?;
+    let mut stmt = conn.prepare(if websites {
+        SITE_HISTORY_SQL
+    } else {
+        HISTORY_SQL
+    })?;
     let rows = stmt.query_map(params![from, to, search.trim(), limit], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
@@ -322,8 +338,15 @@ pub fn get_history(
     an::parse_day(&to)?;
     let conn = conn!(state);
     let websites = kind.as_deref() == Some("websites");
-    query_history(&conn, websites, &from, &to, search.as_deref().unwrap_or(""), limit.unwrap_or(500).clamp(1, 5000))
-        .map_err(err)
+    query_history(
+        &conn,
+        websites,
+        &from,
+        &to,
+        search.as_deref().unwrap_or(""),
+        limit.unwrap_or(500).clamp(1, 5000),
+    )
+    .map_err(err)
 }
 
 fn csv_field(s: &str) -> String {
@@ -349,7 +372,15 @@ pub fn export_csv(
     let websites = kind.as_deref() == Some("websites");
     let rows = {
         let conn = conn!(state);
-        query_history(&conn, websites, &from, &to, search.as_deref().unwrap_or(""), i64::MAX).map_err(err)?
+        query_history(
+            &conn,
+            websites,
+            &from,
+            &to,
+            search.as_deref().unwrap_or(""),
+            i64::MAX,
+        )
+        .map_err(err)?
     };
     let mut out = String::from(if websites {
         "website,browser,category,date,start,end,duration_seconds,duration_minutes\n"
@@ -414,7 +445,9 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Set
         website_tracking: s.website_tracking,
         overrides_per_day: s.overrides_per_day,
         goal_reminder: s.goal_reminder,
-        dashboard_layout: db::get_setting(&conn, "dashboard_layout").map_err(err)?.unwrap_or_default(),
+        dashboard_layout: db::get_setting(&conn, "dashboard_layout")
+            .map_err(err)?
+            .unwrap_or_default(),
     })
 }
 
@@ -439,7 +472,11 @@ pub fn set_goal_reminder(state: State<'_, AppState>, time: String) -> CmdResult<
 
 #[tauri::command]
 pub fn set_dashboard_layout(state: State<'_, AppState>, layout: String) -> CmdResult<()> {
-    if layout.len() > 4000 || serde_json::from_str::<serde_json::Value>(&layout).map(|v| !v.is_array()).unwrap_or(true) {
+    if layout.len() > 4000
+        || serde_json::from_str::<serde_json::Value>(&layout)
+            .map(|v| !v.is_array())
+            .unwrap_or(true)
+    {
         return Err("invalid layout".into());
     }
     let conn = conn!(state);
@@ -455,7 +492,11 @@ pub fn apply_paused(app: &AppHandle, paused: bool) -> CmdResult<()> {
         db::set_setting(&conn, "paused", if paused { "1" } else { "0" }).map_err(err)?;
     }
     if let Some(item) = app.try_state::<TrayPause>() {
-        let _ = item.0.set_text(if paused { "Resume tracking" } else { "Pause tracking" });
+        let _ = item.0.set_text(if paused {
+            "Resume tracking"
+        } else {
+            "Pause tracking"
+        });
     }
     Ok(())
 }
@@ -470,7 +511,10 @@ pub fn set_idle_threshold(state: State<'_, AppState>, secs: u64) -> CmdResult<()
     if !(30..=3600).contains(&secs) {
         return Err("Idle threshold must be between 30 seconds and 60 minutes".into());
     }
-    state.shared.idle_threshold_secs.store(secs, Ordering::SeqCst);
+    state
+        .shared
+        .idle_threshold_secs
+        .store(secs, Ordering::SeqCst);
     let conn = conn!(state);
     db::set_setting(&conn, "idle_threshold_secs", &secs.to_string()).map_err(err)
 }
@@ -478,7 +522,11 @@ pub fn set_idle_threshold(state: State<'_, AppState>, secs: u64) -> CmdResult<()
 #[tauri::command]
 pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
     let launcher = app.autolaunch();
-    let result = if enabled { launcher.enable() } else { launcher.disable() };
+    let result = if enabled {
+        launcher.enable()
+    } else {
+        launcher.disable()
+    };
     result.map_err(err)
 }
 
@@ -512,9 +560,17 @@ pub fn delete_data_older_than(state: State<'_, AppState>, days: i64) -> CmdResul
 
 #[tauri::command]
 pub fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
-    state.shared.notifications_enabled.store(enabled, Ordering::SeqCst);
+    state
+        .shared
+        .notifications_enabled
+        .store(enabled, Ordering::SeqCst);
     let conn = conn!(state);
-    db::set_setting(&conn, "notifications_enabled", if enabled { "1" } else { "0" }).map_err(err)
+    db::set_setting(
+        &conn,
+        "notifications_enabled",
+        if enabled { "1" } else { "0" },
+    )
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -522,27 +578,41 @@ pub fn set_break_reminder(state: State<'_, AppState>, mins: u64) -> CmdResult<()
     if mins > 8 * 60 {
         return Err("Break reminder must be at most 8 hours".into());
     }
-    state.shared.break_reminder_mins.store(mins, Ordering::SeqCst);
+    state
+        .shared
+        .break_reminder_mins
+        .store(mins, Ordering::SeqCst);
     let conn = conn!(state);
     db::set_setting(&conn, "break_reminder_mins", &mins.to_string()).map_err(err)
 }
 
 #[tauri::command]
 pub fn set_website_tracking(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
-    state.shared.website_tracking.store(enabled, Ordering::SeqCst);
+    state
+        .shared
+        .website_tracking
+        .store(enabled, Ordering::SeqCst);
     let conn = conn!(state);
     db::set_setting(&conn, "website_tracking", if enabled { "1" } else { "0" }).map_err(err)
 }
 
 #[tauri::command]
 pub fn send_test_notification(app: AppHandle) {
-    limits::notify(&app, "FocusTrack notifications are on", "This is how limit warnings and break reminders will look.");
+    limits::notify(
+        &app,
+        "FocusTrack notifications are on",
+        "This is how limit warnings and break reminders will look.",
+    );
 }
 
 // -------------------------------------------------------------- websites
 
 #[tauri::command]
-pub fn get_websites(state: State<'_, AppState>, from: String, to: String) -> CmdResult<Vec<SiteUsage>> {
+pub fn get_websites(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> CmdResult<Vec<SiteUsage>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
@@ -550,7 +620,11 @@ pub fn get_websites(state: State<'_, AppState>, from: String, to: String) -> Cmd
 }
 
 #[tauri::command]
-pub fn set_website_category(state: State<'_, AppState>, website_id: i64, category_id: Option<i64>) -> CmdResult<()> {
+pub fn set_website_category(
+    state: State<'_, AppState>,
+    website_id: i64,
+    category_id: Option<i64>,
+) -> CmdResult<()> {
     let conn = conn!(state);
     conn.execute(
         "UPDATE websites SET category_id = ?1 WHERE id = ?2",
@@ -587,7 +661,11 @@ pub fn get_browser_status(state: State<'_, AppState>) -> BrowserStatus {
             m.iter()
                 .map(|(b, r)| {
                     let age = (now - r.at).num_seconds().max(0);
-                    BrowserConn { browser: b.clone(), last_seen_secs: age, connected: age <= browser::FRESH_SECS }
+                    BrowserConn {
+                        browser: b.clone(),
+                        last_seen_secs: age,
+                        connected: age <= browser::FRESH_SECS,
+                    }
                 })
                 .collect()
         })
@@ -684,7 +762,8 @@ pub fn override_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 #[tauri::command]
 pub fn delete_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let conn = conn!(state);
-    conn.execute("DELETE FROM usage_limits WHERE id = ?1", params![id]).map_err(err)?;
+    conn.execute("DELETE FROM usage_limits WHERE id = ?1", params![id])
+        .map_err(err)?;
     db::clear_limit_notifications(&conn, id).map_err(err)
 }
 
@@ -694,13 +773,20 @@ pub fn delete_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 /// Start Menu and registry, which takes a moment).
 #[tauri::command]
 pub async fn get_installed_apps() -> CmdResult<Vec<crate::installed::InstalledApp>> {
-    tauri::async_runtime::spawn_blocking(crate::installed::cached).await.map_err(err)
+    tauri::async_runtime::spawn_blocking(crate::installed::cached)
+        .await
+        .map_err(err)
 }
 
 /// Returns the id for an app, registering it if it has never been used
 /// (so limits can be set for installed-but-unused apps).
 #[tauri::command]
-pub fn ensure_app(state: State<'_, AppState>, exe_name: String, name: String, path: String) -> CmdResult<i64> {
+pub fn ensure_app(
+    state: State<'_, AppState>,
+    exe_name: String,
+    name: String,
+    path: String,
+) -> CmdResult<i64> {
     let exe = exe_name.trim();
     if exe.is_empty() || !exe.to_ascii_lowercase().ends_with(".exe") || exe.contains(['\\', '/']) {
         return Err("invalid executable name".into());
@@ -736,7 +822,8 @@ pub fn get_focus(state: State<'_, AppState>, mode: Option<String>) -> CmdResult<
     let m = mode.as_deref();
     let (today_secs, today_sessions) = crate::focus::totals_mode(&conn, &t, &t, m).map_err(err)?;
     let (week_secs, week_sessions) =
-        crate::focus::totals_mode(&conn, &an::fmt_day(today - Duration::days(6)), &t, m).map_err(err)?;
+        crate::focus::totals_mode(&conn, &an::fmt_day(today - Duration::days(6)), &t, m)
+            .map_err(err)?;
     Ok(FocusOverview {
         active: crate::focus::status(&state.shared),
         today_secs,
@@ -751,9 +838,14 @@ pub fn get_focus(state: State<'_, AppState>, mode: Option<String>) -> CmdResult<
 
 /// What a profile would block if a session started now.
 #[tauri::command]
-pub async fn preview_profile(state: State<'_, AppState>, profile_id: i64) -> CmdResult<crate::profiles::BlockPreview> {
+pub async fn preview_profile(
+    state: State<'_, AppState>,
+    profile_id: i64,
+) -> CmdResult<crate::profiles::BlockPreview> {
     // Warm the installed-apps cache off the main thread first.
-    tauri::async_runtime::spawn_blocking(crate::installed::cached).await.map_err(err)?;
+    tauri::async_runtime::spawn_blocking(crate::installed::cached)
+        .await
+        .map_err(err)?;
     let conn = conn!(state);
     crate::focus::preview(&conn, profile_id).map(|(_, p)| p)
 }
@@ -772,7 +864,10 @@ pub fn get_profiles(state: State<'_, AppState>) -> CmdResult<Vec<crate::profiles
 }
 
 #[tauri::command]
-pub fn save_profile(state: State<'_, AppState>, profile: crate::profiles::Profile) -> CmdResult<i64> {
+pub fn save_profile(
+    state: State<'_, AppState>,
+    profile: crate::profiles::Profile,
+) -> CmdResult<i64> {
     let conn = conn!(state);
     crate::profiles::save(&conn, &profile)
 }
@@ -784,7 +879,10 @@ pub fn delete_profile(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub fn start_focus(state: State<'_, AppState>, plan: crate::focus::FocusPlan) -> CmdResult<crate::focus::FocusStatus> {
+pub fn start_focus(
+    state: State<'_, AppState>,
+    plan: crate::focus::FocusPlan,
+) -> CmdResult<crate::focus::FocusStatus> {
     let conn = conn!(state);
     crate::focus::start(&conn, &state.shared, plan)
 }
@@ -817,7 +915,9 @@ pub fn set_goal(
     if !crate::goals::KINDS.contains(&kind.as_str()) {
         return Err(format!("unknown goal type: {kind}"));
     }
-    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     if title.as_ref().is_some_and(|t| t.len() > 120) {
         return Err("Keep the goal name under 120 characters".into());
     }
@@ -826,7 +926,11 @@ pub fn set_goal(
     }
     let needs_category = kind.ends_with("_category");
     if needs_category != category_id.is_some() {
-        return Err(if needs_category { "Choose a category".into() } else { "This goal has no category".into() });
+        return Err(if needs_category {
+            "Choose a category".into()
+        } else {
+            "This goal has no category".into()
+        });
     }
     let valid = match kind.as_str() {
         "custom" => true,
@@ -845,8 +949,11 @@ pub fn set_goal(
                 params![kind, category_id, target, enabled, title, id],
             )
             .map_err(err)?;
-            conn.execute("DELETE FROM sent_notifications WHERE key LIKE ?1", params![format!("goal:{id}:%")])
-                .map_err(err)?;
+            conn.execute(
+                "DELETE FROM sent_notifications WHERE key LIKE ?1",
+                params![format!("goal:{id}:%")],
+            )
+            .map_err(err)?;
         }
         None => {
             conn.execute(
@@ -869,9 +976,13 @@ pub fn toggle_goal(state: State<'_, AppState>, id: i64) -> CmdResult<bool> {
 #[tauri::command]
 pub fn delete_goal(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let conn = conn!(state);
-    conn.execute("DELETE FROM goals WHERE id = ?1", params![id]).map_err(err)?;
-    conn.execute("DELETE FROM sent_notifications WHERE key LIKE ?1", params![format!("goal:{id}:%")])
+    conn.execute("DELETE FROM goals WHERE id = ?1", params![id])
         .map_err(err)?;
+    conn.execute(
+        "DELETE FROM sent_notifications WHERE key LIKE ?1",
+        params![format!("goal:{id}:%")],
+    )
+    .map_err(err)?;
     Ok(())
 }
 
@@ -886,7 +997,12 @@ pub fn get_insights(state: State<'_, AppState>) -> CmdResult<Vec<crate::insights
 // ----------------------------------------------------------------- notes
 
 fn current_session_id(state: &AppState) -> Option<i64> {
-    state.shared.focus.lock().ok().and_then(|f| f.as_ref().map(|a| a.session_id))
+    state
+        .shared
+        .focus
+        .lock()
+        .ok()
+        .and_then(|f| f.as_ref().map(|a| a.session_id))
 }
 
 #[tauri::command]
@@ -896,23 +1012,52 @@ pub fn get_notebooks(state: State<'_, AppState>) -> CmdResult<Vec<crate::notes::
 }
 
 #[tauri::command]
-pub fn get_notes(state: State<'_, AppState>, notebook: Option<String>, search: Option<String>) -> CmdResult<Vec<crate::notes::Note>> {
+pub fn get_notes(
+    state: State<'_, AppState>,
+    notebook: Option<String>,
+    search: Option<String>,
+) -> CmdResult<Vec<crate::notes::Note>> {
     let conn = conn!(state);
     crate::notes::list(&conn, notebook.as_deref(), search.as_deref()).map_err(err)
 }
 
 /// New note; linked to the running focus/study session, if any.
 #[tauri::command]
-pub fn create_note(state: State<'_, AppState>, notebook: String, title: String, body: String) -> CmdResult<crate::notes::Note> {
+pub fn create_note(
+    state: State<'_, AppState>,
+    notebook: String,
+    title: String,
+    body: String,
+) -> CmdResult<crate::notes::Note> {
     let session = current_session_id(&state);
     let conn = conn!(state);
-    crate::notes::create(&conn, &notebook, &title, &body, session, Local::now().naive_local())
+    crate::notes::create(
+        &conn,
+        &notebook,
+        &title,
+        &body,
+        session,
+        Local::now().naive_local(),
+    )
 }
 
 #[tauri::command]
-pub fn update_note(state: State<'_, AppState>, id: i64, notebook: String, title: String, body: String) -> CmdResult<crate::notes::Note> {
+pub fn update_note(
+    state: State<'_, AppState>,
+    id: i64,
+    notebook: String,
+    title: String,
+    body: String,
+) -> CmdResult<crate::notes::Note> {
     let conn = conn!(state);
-    crate::notes::update(&conn, id, &notebook, &title, &body, Local::now().naive_local())
+    crate::notes::update(
+        &conn,
+        id,
+        &notebook,
+        &title,
+        &body,
+        Local::now().naive_local(),
+    )
 }
 
 #[tauri::command]
@@ -930,7 +1075,12 @@ pub fn get_resources(state: State<'_, AppState>) -> CmdResult<Vec<crate::notes::
 }
 
 #[tauri::command]
-pub fn add_resource(state: State<'_, AppState>, title: String, url: String, subject: Option<String>) -> CmdResult<()> {
+pub fn add_resource(
+    state: State<'_, AppState>,
+    title: String,
+    url: String,
+    subject: Option<String>,
+) -> CmdResult<()> {
     let conn = conn!(state);
     crate::notes::add_resource(&conn, &title, &url, subject.as_deref())
 }
@@ -956,12 +1106,15 @@ pub fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
 pub fn get_study_time(state: State<'_, AppState>) -> CmdResult<(i64, i64)> {
     let conn = conn!(state);
     let study: i64 = conn
-        .query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| r.get(0))
+        .query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| {
+            r.get(0)
+        })
         .map_err(err)?;
     let today = Local::now().date_naive();
     let mut week = 0;
     for i in 0..7 {
-        week += crate::goals::category_secs(&conn, &an::fmt_day(today - Duration::days(i)), study).map_err(err)?;
+        week += crate::goals::category_secs(&conn, &an::fmt_day(today - Duration::days(i)), study)
+            .map_err(err)?;
     }
     let t = crate::goals::category_secs(&conn, &an::fmt_day(today), study).map_err(err)?;
     Ok((t, week))
