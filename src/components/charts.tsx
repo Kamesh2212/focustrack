@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { CategoryUsage, DayTotal } from "../lib/types";
+import type { CategoryUsage, DayKinds, DayTotal } from "../lib/types";
 import { dayLabel, fmtDuration, hourLabel, toHours, weekdayShort } from "../lib/format";
 import { Empty } from "./ui";
 
@@ -169,5 +169,49 @@ export function Heatmap({ grid }: { grid: number[][] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+const KIND_COLORS = { productive: "#10b981", neutral: "#94a3b8", distracting: "#ef4444" };
+
+/** Productive / neutral / distracting app time per day. */
+export function ProductivityChart({ days, height = 220 }: { days: DayKinds[]; height?: number }) {
+  const short = days.length <= 7;
+  const data = days.map((d) => ({
+    ...d,
+    label: short ? weekdayShort(d.day) : dayLabel(d.day),
+    productive: toHours(d.productiveSecs),
+    neutral: toHours(d.neutralSecs),
+    distracting: toHours(d.distractingSecs),
+  }));
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+        <CartesianGrid vertical={false} strokeOpacity={0.15} />
+        <XAxis dataKey="label" tick={AXIS} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={8} />
+        <YAxis tick={AXIS} tickLine={false} axisLine={false} unit="h" allowDecimals={false} />
+        <Tooltip
+          cursor={{ fill: "rgba(148,163,184,0.12)" }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const d = payload[0].payload as DayKinds;
+            const total = d.productiveSecs + d.neutralSecs + d.distractingSecs;
+            return (
+              <TooltipBox
+                title={`${dayLabel(d.day)} · ${total ? Math.round((d.productiveSecs / total) * 100) : 0}% productive`}
+                rows={[
+                  { label: "Productive", value: fmtDuration(d.productiveSecs), color: KIND_COLORS.productive },
+                  { label: "Neutral", value: fmtDuration(d.neutralSecs), color: KIND_COLORS.neutral },
+                  { label: "Distracting", value: fmtDuration(d.distractingSecs), color: KIND_COLORS.distracting },
+                ]}
+              />
+            );
+          }}
+        />
+        <Bar dataKey="productive" stackId="k" fill={KIND_COLORS.productive} maxBarSize={36} />
+        <Bar dataKey="neutral" stackId="k" fill={KIND_COLORS.neutral} maxBarSize={36} />
+        <Bar dataKey="distracting" stackId="k" fill={KIND_COLORS.distracting} radius={[4, 4, 0, 0]} maxBarSize={36} />
+      </BarChart>
+    </ResponsiveContainer>
   );
 }

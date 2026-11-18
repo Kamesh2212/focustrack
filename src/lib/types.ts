@@ -114,6 +114,9 @@ export interface Report {
   sites: SiteUsage[];
   siteSecs: number;
   categories: CategoryUsage[];
+  productivity: DayKinds[];
+  focusSecs: number;
+  focusSessions: number;
   hourly: number[];
   heatmap: number[][];
 }
@@ -141,4 +144,80 @@ export interface Settings {
   notificationsEnabled: boolean;
   breakReminderMins: number;
   websiteTracking: boolean;
+}
+
+export interface DayKinds {
+  day: string;
+  productiveSecs: number;
+  neutralSecs: number;
+  distractingSecs: number;
+}
+
+export interface InstalledApp {
+  exeName: string;
+  name: string;
+  path: string;
+}
+
+export interface FocusPlan {
+  label: string;
+  focusMins: number;
+  breakMins: number;
+  longBreakMins: number;
+  rounds: number;
+  blockDistracting: boolean;
+}
+
+export interface FocusStatus {
+  label: string;
+  phase: "focus" | "break";
+  round: number;
+  rounds: number;
+  startedAt: string;
+  endsAt: string;
+  remainingSecs: number;
+  totalSecs: number;
+  blockDistracting: boolean;
+  plan: FocusPlan;
+}
+
+export interface FocusRecord {
+  id: number;
+  label: string;
+  day: string;
+  start: string;
+  end: string | null;
+  plannedSecs: number;
+  actualSecs: number;
+  completed: boolean;
+}
+
+export interface FocusOverview {
+  active: FocusStatus | null;
+  todaySecs: number;
+  todaySessions: number;
+  weekSecs: number;
+  weekSessions: number;
+  streakDays: number;
+  history: FocusRecord[];
+}
+
+export type GoalKind = "max_screen" | "min_category" | "max_category" | "min_focus_sessions";
+
+export interface GoalStatus {
+  id: number;
+  kind: GoalKind;
+  categoryId: number | null;
+  category: string | null;
+  color: string;
+  target: number;
+  enabled: boolean;
+  current: number;
+  state: "achieved" | "in_progress" | "on_track" | "exceeded";
+  label: string;
+}
+
+export interface Insight {
+  tone: "good" | "warn" | "info";
+  text: string;
 }

@@ -1,21 +1,54 @@
-async function render() {
-  const s = await chrome.storage.session.get(["connected", "tracking", "current", "blocked"]);
-  const status = document.getElementById("status");
-  const text = document.getElementById("status-text");
+import { fetchSummary, fmt, fmtClock, renderLimits, renderSites } from "./usage.js";
+
+const $ = (id) => document.getElementById(id);
+
+async function renderStatus() {
+  const s = await chrome.storage.session.get(["connected", "tracking", "current"]);
+  const status = $("status");
   if (!s.connected) {
     status.className = "status off";
-    text.textContent = "FocusTrack app not running";
+    $("status-text").textContent = "App not running";
   } else if (!s.tracking) {
     status.className = "status warn";
-    text.textContent = "Website tracking is off in FocusTrack";
+    $("status-text").textContent = "Website tracking off";
   } else {
     status.className = "status on";
-    text.textContent = "Connected — tracking websites";
+    $("status-text").textContent = "Connected";
   }
-  document.getElementById("current").textContent = s.current || "—";
-  const blocked = Array.isArray(s.blocked) ? s.blocked : [];
-  document.getElementById("blocked").textContent = blocked.length ? blocked.join(", ") : "None";
+  $("current").textContent = s.current || "—";
 }
 
-render();
-chrome.runtime.sendMessage({ type: "refresh" }).then(render).catch(render);
+function renderFocus(focus) {
+  const box = $("focus");
+  if (!focus) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const end = new Date(focus.endsAt.replace(" ", "T")).getTime();
+  const tick = () => {
+    const left = (end - Date.now()) / 1000;
+    const what = focus.phase === "focus" ? `Focusing: ${focus.label}` : "Break";
+    const round = focus.rounds > 1 ? ` · round ${focus.round}/${focus.rounds}` : "";
+    box.textContent = `${what}${round} — ${fmtClock(left)} left`;
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+async function renderUsage() {
+  try {
+    const s = await fetchSummary();
+    $("screen").textContent = fmt(s.screenSecs);
+    $("web").textContent = fmt(s.webSecs);
+    renderSites($("sites"), s.topSites, 5);
+    renderLimits($("limits"), s.limits);
+    renderFocus(s.focus);
+  } catch {
+    $("sites").textContent = "Start the FocusTrack app to see your usage.";
+  }
+}
+
+renderStatus();
+renderUsage();
+chrome.runtime.sendMessage({ type: "refresh" }).then(renderStatus).catch(renderStatus);

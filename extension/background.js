@@ -29,23 +29,30 @@ function domainOf(url) {
   }
 }
 
-function isBlocked(domain, blocked) {
-  return !!domain && blocked.some((b) => domain === b || domain.endsWith("." + b));
+function matches(domain, list) {
+  return !!domain && list.some((b) => domain === b || domain.endsWith("." + b));
 }
 
-async function blockedList() {
-  const { blocked } = await chrome.storage.session.get("blocked");
-  return Array.isArray(blocked) ? blocked : [];
+async function blockState() {
+  const s = await chrome.storage.session.get(["blocked", "focusBlocked", "focusEndsAt"]);
+  return {
+    blocked: Array.isArray(s.blocked) ? s.blocked : [],
+    focusBlocked: Array.isArray(s.focusBlocked) ? s.focusBlocked : [],
+    focusEndsAt: s.focusEndsAt ?? null,
+  };
 }
 
-async function enforce(tab, blocked) {
+/** Redirects a tab to the blocked page if its site is over its limit or blocked for focus. */
+async function enforce(tab, state) {
   if (!tab || tab.id == null || tab.incognito) return;
   const domain = domainOf(tab.url ?? "");
-  if (isBlocked(domain, blocked)) {
-    await chrome.tabs.update(tab.id, {
-      url: chrome.runtime.getURL(`blocked.html?d=${encodeURIComponent(domain)}`),
-    });
-  }
+  let reason = null;
+  if (matches(domain, state.blocked)) reason = "limit";
+  else if (matches(domain, state.focusBlocked)) reason = "focus";
+  if (!reason) return;
+  const q = new URLSearchParams({ d: domain, r: reason });
+  if (reason === "focus" && state.focusEndsAt) q.set("until", state.focusEndsAt);
+  await chrome.tabs.update(tab.id, { url: chrome.runtime.getURL(`blocked.html?${q}`) });
 }
 
 async function activeState() {
@@ -75,15 +82,24 @@ async function beat() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const blocked = Array.isArray(data.blocked) ? data.blocked : [];
+      const state = {
+        blocked: Array.isArray(data.blocked) ? data.blocked : [],
+        focusBlocked: Array.isArray(data.focusBlocked) ? data.focusBlocked : [],
+        focusEndsAt: data.focusEndsAt ?? null,
+      };
+      const wasFocus = (await blockState()).focusBlocked.length > 0;
       await chrome.storage.session.set({
         connected: true,
         tracking: !!data.tracking,
-        blocked,
+        ...state,
         current: s.domain,
         lastOk: Date.now(),
       });
-      await enforce(s.tab, blocked);
+      await enforce(s.tab, state);
+      // A focus round just started: close the door on distracting tabs that are already open.
+      if (!wasFocus && state.focusBlocked.length) {
+        for (const tab of await chrome.tabs.query({})) await enforce(tab, state);
+      }
     } catch {
       await chrome.storage.session.set({ connected: false, current: s.domain });
     }
@@ -100,7 +116,7 @@ chrome.tabs.onActivated.addListener(() => beat());
 chrome.windows.onFocusChanged.addListener(() => beat());
 chrome.tabs.onUpdated.addListener(async (_id, info, tab) => {
   if (!info.url && info.status !== "complete") return;
-  await enforce(tab, await blockedList());
+  await enforce(tab, await blockState());
   if (tab.active) beat();
 });
 
@@ -111,7 +127,7 @@ chrome.alarms.onAlarm.addListener((a) => {
 chrome.runtime.onStartup.addListener(() => beat());
 chrome.runtime.onInstalled.addListener(() => beat());
 
-// Popup asks for a fresh status.
+// Popup and new-tab page ask for a fresh heartbeat.
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === "refresh") {
     beat().then(() => reply(true));

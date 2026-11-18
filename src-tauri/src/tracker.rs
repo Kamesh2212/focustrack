@@ -59,6 +59,9 @@ pub struct Shared {
     pub browsers: Mutex<HashMap<String, BrowserReport>>,
     /// Domains the extensions should block (limit reached, blocking on).
     pub blocklist: Mutex<Vec<String>>,
+    /// Distracting domains blocked while a focus round is running.
+    pub focus_blocklist: Mutex<Vec<String>>,
+    pub focus: Mutex<Option<crate::focus::ActiveFocus>>,
     pub website_tracking: AtomicBool,
     pub server_running: AtomicBool,
     pub notifications_enabled: AtomicBool,
@@ -76,6 +79,8 @@ impl Shared {
             status: Mutex::new(LiveStatus { state: "starting".into(), ..Default::default() }),
             browsers: Mutex::new(HashMap::new()),
             blocklist: Mutex::new(Vec::new()),
+            focus_blocklist: Mutex::new(Vec::new()),
+            focus: Mutex::new(None),
             website_tracking: AtomicBool::new(true),
             server_running: AtomicBool::new(false),
             notifications_enabled: AtomicBool::new(true),

@@ -192,6 +192,11 @@ fn check(conn: &Connection, app: &tauri::AppHandle, shared: &Shared) -> rusqlite
         return Ok(());
     }
     let mut notices = limit_notices(&limits);
+    for g in crate::goals::goal_status(conn, &day)? {
+        if let Some((key, title, body)) = crate::goals::goal_notice(&g) {
+            notices.push(Notice { key, title, body });
+        }
+    }
     let spans = analytics::active_spans(conn, &day, &day)?;
     notices.extend(break_notice(&spans, now, shared.break_reminder_mins.load(Ordering::SeqCst)));
     for n in notices {

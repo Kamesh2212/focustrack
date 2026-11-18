@@ -19,8 +19,8 @@ import Reports from "./pages/Reports";
 import History from "./pages/History";
 import Websites from "./pages/Websites";
 import Limits from "./pages/Limits";
+import Focus from "./pages/Focus";
 import Settings from "./pages/Settings";
-import ComingSoon from "./pages/ComingSoon";
 
 type PageId = "dashboard" | "applications" | "websites" | "reports" | "focus" | "limits" | "history" | "settings";
 
@@ -114,22 +114,7 @@ export default function App() {
           {page === "settings" && <Settings onThemeChange={setTheme} />}
           {page === "websites" && <Websites />}
           {page === "limits" && <Limits />}
-          {page === "focus" && (
-            <ComingSoon
-              title="Focus Mode"
-              phase="Phase 4 · Productivity"
-              icon={Timer}
-              summary="Timed focus sessions with breaks, history and optional blocking of distracting sites."
-              features={[
-                "25-minute Pomodoro",
-                "50-minute deep work",
-                "90-minute study session",
-                "Custom durations and breaks",
-                "Focus session history and totals",
-                "Session-complete notifications",
-              ]}
-            />
-          )}
+          {page === "focus" && <Focus />}
         </div>
       </main>
     </div>

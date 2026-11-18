@@ -42,9 +42,62 @@ struct Heartbeat {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HeartbeatReply<'a> {
     tracking: bool,
+    /// Blocked because a daily limit was reached.
     blocked: &'a [String],
+    /// Blocked because a focus round is running.
+    focus_blocked: &'a [String],
+    focus_ends_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SiteRow {
+    domain: String,
+    category: String,
+    color: String,
+    secs: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Summary {
+    date: String,
+    screen_secs: i64,
+    active_secs: i64,
+    web_secs: i64,
+    top_sites: Vec<SiteRow>,
+    limits: Vec<crate::limits::LimitStatus>,
+    goals: Vec<crate::goals::GoalStatus>,
+    focus: Option<crate::focus::FocusStatus>,
+    focus_today_secs: i64,
+}
+
+/// Today's usage for the extension's popup and new-tab page.
+fn summary(conn: &rusqlite::Connection, shared: &Shared) -> rusqlite::Result<Summary> {
+    use crate::analytics as an;
+    let day = an::fmt_day(now().date());
+    let (active, idle) = an::totals(conn, &day, &day)?;
+    let sites = an::site_usage(conn, &day, &day)?;
+    let (focus_secs, _) = crate::focus::totals(conn, &day, &day)?;
+    Ok(Summary {
+        screen_secs: active + idle,
+        active_secs: active,
+        web_secs: an::site_total(conn, &day, &day)?,
+        top_sites: sites
+            .into_iter()
+            .filter(|s| s.secs > 0)
+            .take(8)
+            .map(|s| SiteRow { domain: s.domain, category: s.category, color: s.color, secs: s.secs })
+            .collect(),
+        limits: crate::limits::limit_status(conn, &day)?.into_iter().filter(|l| l.enabled).collect(),
+        goals: crate::goals::goal_status(conn, &day)?.into_iter().filter(|g| g.enabled).collect(),
+        focus: crate::focus::status(shared),
+        focus_today_secs: focus_secs,
+        date: day,
+    })
 }
 
 /// Lower-cases, strips `www.` and trailing dots, and rejects anything that is
@@ -77,7 +130,7 @@ fn now() -> NaiveDateTime {
     t.with_nanosecond(0).unwrap_or(t)
 }
 
-fn handle(mut req: Request, shared: &Shared) {
+fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>) {
     let origin_ok = header(&req, "Origin").map_or(true, |o| {
         o.starts_with("chrome-extension://") || o.starts_with("moz-extension://") || o.starts_with("extension://")
     });
@@ -107,6 +160,21 @@ fn handle(mut req: Request, shared: &Shared) {
                 "tracking": shared.website_tracking.load(Ordering::SeqCst),
             });
             let _ = req.respond(json_response(200, body.to_string()));
+        }
+        (Method::Get, "/v1/summary") => {
+            // Usage data: extension-only (the header forces a CORS preflight for web pages).
+            if header(&req, "X-FocusTrack").is_none() {
+                let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
+                return;
+            }
+            let body = conn
+                .ok_or_else(|| "database unavailable".to_string())
+                .and_then(|c| summary(c, shared).map_err(|e| e.to_string()))
+                .and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string()));
+            let _ = match body {
+                Ok(b) => req.respond(json_response(200, b)),
+                Err(e) => req.respond(json_response(500, serde_json::json!({ "error": e }).to_string())),
+            };
         }
         (Method::Post, "/v1/heartbeat") => {
             if header(&req, "X-FocusTrack").is_none() {
@@ -139,7 +207,18 @@ fn handle(mut req: Request, shared: &Shared) {
                 map.insert(beat.browser, report);
             }
             let blocked = shared.blocklist.lock().map(|b| b.clone()).unwrap_or_default();
-            let reply = HeartbeatReply { tracking, blocked: &blocked };
+            let focus = crate::focus::status(shared);
+            let focus_blocked = if focus.as_ref().is_some_and(|f| f.phase == crate::focus::Phase::Focus) {
+                shared.focus_blocklist.lock().map(|b| b.clone()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let reply = HeartbeatReply {
+                tracking,
+                blocked: &blocked,
+                focus_blocked: &focus_blocked,
+                focus_ends_at: focus.map(|f| f.ends_at),
+            };
             let _ = req.respond(json_response(200, serde_json::to_string(&reply).unwrap_or_default()));
         }
         // No CORS headers: web pages' preflights fail, which is the point.
@@ -152,7 +231,7 @@ fn handle(mut req: Request, shared: &Shared) {
     }
 }
 
-pub fn spawn_server(shared: Arc<Shared>) {
+pub fn spawn_server(shared: Arc<Shared>, db_path: std::path::PathBuf) {
     thread::Builder::new()
         .name("focustrack-browser-api".into())
         .spawn(move || {
@@ -164,8 +243,9 @@ pub fn spawn_server(shared: Arc<Shared>) {
                 }
             };
             shared.server_running.store(true, Ordering::SeqCst);
+            let conn = crate::db::open(&db_path).map_err(|e| eprintln!("[browser] database: {e}")).ok();
             for req in server.incoming_requests() {
-                handle(req, &shared);
+                handle(req, &shared, conn.as_ref());
             }
             shared.server_running.store(false, Ordering::SeqCst);
         })

@@ -174,6 +174,9 @@ pub struct Report {
     pub sites: Vec<SiteUsage>,
     pub site_secs: i64,
     pub categories: Vec<CategoryUsage>,
+    pub productivity: Vec<an::DayKinds>,
+    pub focus_secs: i64,
+    pub focus_sessions: i64,
     pub hourly: Vec<i64>,
     /// 7 rows (Mon..Sun) x 24 hours, active seconds.
     pub heatmap: Vec<Vec<i64>>,
@@ -199,6 +202,8 @@ pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdRe
     let spans = an::active_spans(&conn, &from, &to).map_err(err)?;
     let (hours, heat) = an::hour_buckets(&spans);
     let (productive, distracting) = an::productive_split(&categories);
+    let productivity = an::daily_kinds(&conn, f, t).map_err(err)?;
+    let (focus_secs, focus_sessions) = crate::focus::totals(&conn, &from, &to).map_err(err)?;
 
     let is_weekend = |d: &DayTotal| {
         an::parse_day(&d.day)
@@ -231,6 +236,9 @@ pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdRe
         sites: sites.into_iter().filter(|s| s.secs > 0).take(25).collect(),
         site_secs,
         categories,
+        productivity,
+        focus_secs,
+        focus_sessions,
         hourly: hours.to_vec(),
         heatmap: heat.iter().map(|r| r.to_vec()).collect(),
     })
@@ -612,4 +620,157 @@ pub fn delete_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let conn = conn!(state);
     conn.execute("DELETE FROM usage_limits WHERE id = ?1", params![id]).map_err(err)?;
     db::clear_limit_notifications(&conn, id).map_err(err)
+}
+
+// -------------------------------------------------------- installed apps
+
+static INSTALLED: std::sync::Mutex<Option<(std::time::Instant, Vec<crate::installed::InstalledApp>)>> =
+    std::sync::Mutex::new(None);
+
+/// Apps installed on this PC (cached for 10 minutes; the scan reads the
+/// Start Menu and registry, which takes a moment).
+#[tauri::command]
+pub async fn get_installed_apps() -> CmdResult<Vec<crate::installed::InstalledApp>> {
+    if let Ok(cache) = INSTALLED.lock() {
+        if let Some((at, apps)) = cache.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(600) {
+                return Ok(apps.clone());
+            }
+        }
+    }
+    let apps = tauri::async_runtime::spawn_blocking(crate::installed::scan)
+        .await
+        .map_err(err)?;
+    if let Ok(mut cache) = INSTALLED.lock() {
+        *cache = Some((std::time::Instant::now(), apps.clone()));
+    }
+    Ok(apps)
+}
+
+/// Returns the id for an app, registering it if it has never been used
+/// (so limits can be set for installed-but-unused apps).
+#[tauri::command]
+pub fn ensure_app(state: State<'_, AppState>, exe_name: String, name: String, path: String) -> CmdResult<i64> {
+    let exe = exe_name.trim();
+    if exe.is_empty() || !exe.to_ascii_lowercase().ends_with(".exe") || exe.contains(['\\', '/']) {
+        return Err("invalid executable name".into());
+    }
+    let conn = conn!(state);
+    let now = Local::now().naive_local();
+    db::get_or_create_app(&conn, exe, &path, || name.trim().to_string(), now)
+        .map(|(id, _)| id)
+        .map_err(err)
+}
+
+// ------------------------------------------------------------ focus mode
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusOverview {
+    pub active: Option<crate::focus::FocusStatus>,
+    pub today_secs: i64,
+    pub today_sessions: i64,
+    pub week_secs: i64,
+    pub week_sessions: i64,
+    pub streak_days: i64,
+    pub history: Vec<crate::focus::FocusRecord>,
+}
+
+#[tauri::command]
+pub fn get_focus(state: State<'_, AppState>) -> CmdResult<FocusOverview> {
+    let conn = conn!(state);
+    let today = Local::now().date_naive();
+    let t = an::fmt_day(today);
+    let (today_secs, today_sessions) = crate::focus::totals(&conn, &t, &t).map_err(err)?;
+    let (week_secs, week_sessions) =
+        crate::focus::totals(&conn, &an::fmt_day(today - Duration::days(6)), &t).map_err(err)?;
+    Ok(FocusOverview {
+        active: crate::focus::status(&state.shared),
+        today_secs,
+        today_sessions,
+        week_secs,
+        week_sessions,
+        streak_days: crate::focus::streak(&conn, today).map_err(err)?,
+        history: crate::focus::history(&conn, 30).map_err(err)?,
+    })
+}
+
+#[tauri::command]
+pub fn start_focus(state: State<'_, AppState>, plan: crate::focus::FocusPlan) -> CmdResult<crate::focus::FocusStatus> {
+    let conn = conn!(state);
+    crate::focus::start(&conn, &state.shared, plan)
+}
+
+#[tauri::command]
+pub fn stop_focus(state: State<'_, AppState>) -> CmdResult<()> {
+    let conn = conn!(state);
+    crate::focus::stop(&conn, &state.shared).map_err(err)
+}
+
+// ----------------------------------------------------------------- goals
+
+#[tauri::command]
+pub fn get_goals(state: State<'_, AppState>) -> CmdResult<Vec<crate::goals::GoalStatus>> {
+    let conn = conn!(state);
+    crate::goals::goal_status(&conn, &an::fmt_day(Local::now().date_naive())).map_err(err)
+}
+
+/// Creates (no `id`) or updates a goal.
+#[tauri::command]
+pub fn set_goal(
+    state: State<'_, AppState>,
+    id: Option<i64>,
+    kind: String,
+    category_id: Option<i64>,
+    target: i64,
+    enabled: bool,
+) -> CmdResult<()> {
+    if !crate::goals::KINDS.contains(&kind.as_str()) {
+        return Err(format!("unknown goal type: {kind}"));
+    }
+    let needs_category = kind.ends_with("_category");
+    if needs_category != category_id.is_some() {
+        return Err(if needs_category { "Choose a category".into() } else { "This goal has no category".into() });
+    }
+    let valid = if kind == "min_focus_sessions" { (1..=20).contains(&target) } else { (60..=24 * 3600).contains(&target) };
+    if !valid {
+        return Err("That target is out of range".into());
+    }
+    let conn = conn!(state);
+    match id {
+        Some(id) => {
+            conn.execute(
+                "UPDATE goals SET kind = ?1, category_id = ?2, target = ?3, enabled = ?4 WHERE id = ?5",
+                params![kind, category_id, target, enabled, id],
+            )
+            .map_err(err)?;
+            conn.execute("DELETE FROM sent_notifications WHERE key LIKE ?1", params![format!("goal:{id}:%")])
+                .map_err(err)?;
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO goals (kind, category_id, target, enabled) VALUES (?1, ?2, ?3, ?4)",
+                params![kind, category_id, target, enabled],
+            )
+            .map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_goal(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let conn = conn!(state);
+    conn.execute("DELETE FROM goals WHERE id = ?1", params![id]).map_err(err)?;
+    conn.execute("DELETE FROM sent_notifications WHERE key LIKE ?1", params![format!("goal:{id}:%")])
+        .map_err(err)?;
+    Ok(())
+}
+
+// -------------------------------------------------------------- insights
+
+#[tauri::command]
+pub fn get_insights(state: State<'_, AppState>) -> CmdResult<Vec<crate::insights::Insight>> {
+    let conn = conn!(state);
+    crate::insights::insights(&conn, Local::now().date_naive()).map_err(err)
 }

@@ -5,6 +5,10 @@ mod browser;
 mod categories;
 mod commands;
 mod db;
+mod focus;
+mod goals;
+mod insights;
+mod installed;
 mod limits;
 mod platform;
 mod tracker;
@@ -114,7 +118,8 @@ pub fn run() {
             shared.notifications_enabled.store(settings.notifications_enabled, Ordering::SeqCst);
             shared.break_reminder_mins.store(settings.break_reminder_mins, Ordering::SeqCst);
             tracker::spawn(db_path.clone(), shared.clone());
-            browser::spawn_server(shared.clone());
+            browser::spawn_server(shared.clone(), db_path.clone());
+            focus::spawn(app.handle().clone(), db_path.clone(), shared.clone());
             limits::spawn(app.handle().clone(), db_path, shared.clone());
 
             app.manage(AppState { db: Mutex::new(conn), shared, data_dir });
@@ -160,6 +165,15 @@ pub fn run() {
             commands::get_limits,
             commands::set_limit,
             commands::delete_limit,
+            commands::get_installed_apps,
+            commands::ensure_app,
+            commands::start_focus,
+            commands::stop_focus,
+            commands::get_focus,
+            commands::get_goals,
+            commands::set_goal,
+            commands::delete_goal,
+            commands::get_insights,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

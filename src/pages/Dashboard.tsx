@@ -1,4 +1,4 @@
-import { Pause, Lock, Moon, Activity } from "lucide-react";
+import { Pause, Lock, Moon, Activity, Brain, Coffee } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad, useNow } from "../lib/hooks";
 import { fmtDuration, pctChange } from "../lib/format";
@@ -7,6 +7,9 @@ import { Card, ErrorNote, PageHeader, Stat, cx } from "../components/ui";
 import { CategoryDonut, DailyChart, HourlyChart } from "../components/charts";
 import { AppList } from "../components/AppList";
 import { SiteList } from "../components/SiteList";
+import { GoalProgress } from "../components/Goals";
+import { InsightList } from "../components/Insights";
+import type { FocusStatus } from "../lib/types";
 
 function parseTs(ts: string): number {
   return new Date(ts.replace(" ", "T")).getTime();
@@ -44,8 +47,29 @@ function LiveBanner({ live }: { live: LiveStatus }) {
   );
 }
 
+function FocusBanner({ f }: { f: FocusStatus }) {
+  const now = useNow();
+  const left = Math.max(0, (parseTs(f.endsAt) - now) / 1000);
+  const m = Math.floor(left / 60);
+  const s = String(Math.floor(left % 60)).padStart(2, "0");
+  const Icon = f.phase === "focus" ? Brain : Coffee;
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm text-indigo-800 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-200">
+      <Icon size={16} />
+      <span className="font-medium">{f.phase === "focus" ? `Focusing: ${f.label}` : "On a break"}</span>
+      {f.rounds > 1 && <span className="text-indigo-600/80 dark:text-indigo-300/80">round {f.round} of {f.rounds}</span>}
+      <span className="tabular ml-auto font-medium">
+        {m}:{s} left
+      </span>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { data: d, error } = useLoad(() => api.dashboard(), [], 5000);
+  const focus = useLoad(() => api.focus(), [], 5000);
+  const goals = useLoad(() => api.goals(), [], 30000);
+  const insights = useLoad(() => api.insights(), [], 300000);
 
   if (!d) return <ErrorNote error={error} />;
 
@@ -60,6 +84,7 @@ export default function Dashboard() {
         subtitle={new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
       />
       <ErrorNote error={error} />
+      {focus.data?.active && <FocusBanner f={focus.data.active} />}
       <LiveBanner live={d.live} />
 
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
@@ -135,6 +160,14 @@ export default function Dashboard() {
             />
           </Card>
         </div>
+      </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card title="Today's goals">
+          <GoalProgress goals={goals.data ?? []} />
+        </Card>
+        <Card title="Insights">
+          <InsightList insights={insights.data ?? []} />
+        </Card>
       </div>
     </>
   );

@@ -137,6 +137,43 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              COMMIT;",
         )?;
     }
+
+    if version < 3 {
+        // Phase 4: focus sessions and daily goals.
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS focus_sessions (
+                 id                INTEGER PRIMARY KEY,
+                 label             TEXT NOT NULL,
+                 kind              TEXT NOT NULL CHECK (kind IN ('focus', 'break')),
+                 planned_secs      INTEGER NOT NULL,
+                 day               TEXT NOT NULL,
+                 start_time        TEXT NOT NULL,
+                 end_time          TEXT,
+                 actual_secs       INTEGER NOT NULL DEFAULT 0,
+                 completed         INTEGER NOT NULL DEFAULT 0,
+                 block_distracting INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_focus_day ON focus_sessions(day);
+             CREATE TABLE IF NOT EXISTS goals (
+                 id          INTEGER PRIMARY KEY,
+                 kind        TEXT NOT NULL CHECK (kind IN ('max_screen', 'min_category', 'max_category', 'min_focus_sessions')),
+                 category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+                 target      INTEGER NOT NULL,
+                 enabled     INTEGER NOT NULL DEFAULT 1
+             );
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
+
+    // A focus session left open by a crash or shutdown ends where it was last saved.
+    conn.execute(
+        "UPDATE focus_sessions
+         SET end_time = strftime('%Y-%m-%d %H:%M:%S', start_time, '+' || actual_secs || ' seconds')
+         WHERE end_time IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
@@ -347,6 +384,7 @@ pub fn delete_all_usage(conn: &Connection) -> rusqlite::Result<()> {
          DELETE FROM idle_periods;
          DELETE FROM website_sessions;
          DELETE FROM sent_notifications;
+         DELETE FROM focus_sessions;
          COMMIT;",
     )
 }
@@ -355,6 +393,7 @@ pub fn delete_usage_before(conn: &Connection, day: &str) -> rusqlite::Result<usi
     let a = conn.execute("DELETE FROM usage_sessions WHERE day < ?1", params![day])?;
     let b = conn.execute("DELETE FROM idle_periods WHERE day < ?1", params![day])?;
     let c = conn.execute("DELETE FROM website_sessions WHERE day < ?1", params![day])?;
+    conn.execute("DELETE FROM focus_sessions WHERE day < ?1", params![day])?;
     conn.execute("DELETE FROM sent_notifications WHERE day < ?1", params![day])?;
     Ok(a + b + c)
 }
@@ -375,7 +414,7 @@ mod tests {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
         assert_eq!(n as usize, DEFAULT_CATEGORIES.len());
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]

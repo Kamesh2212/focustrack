@@ -13,6 +13,10 @@ import type {
   SiteUsage,
   LimitStatus,
   BrowserStatus,
+  FocusPlan,
+  FocusStatus,
+  GoalStatus,
+  InstalledApp,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -56,6 +60,54 @@ let limits: LimitStatus[] = [
   { id: 3, targetType: "app", targetId: 6, name: "Steam", color: "#8b5cf6", dailyLimitSecs: 7200, warnPct: 80, block: false, enabled: true, usedSecs: 2400 },
 ];
 let nextLimitId = 4;
+
+const INSTALLED: InstalledApp[] = [
+  { exeName: "Code.exe", name: "Visual Studio Code", path: "C:\\Apps\\Code.exe" },
+  { exeName: "Discord.exe", name: "Discord", path: "C:\\Apps\\Discord.exe" },
+  { exeName: "steam.exe", name: "Steam", path: "C:\\Apps\\steam.exe" },
+  { exeName: "blender.exe", name: "Blender", path: "C:\\Apps\\blender.exe" },
+  { exeName: "Zoom.exe", name: "Zoom Workplace", path: "C:\\Apps\\Zoom.exe" },
+  { exeName: "obs64.exe", name: "OBS Studio", path: "C:\\Apps\\obs64.exe" },
+];
+let nextAppId = 100;
+
+let focusActive: FocusStatus | null = null;
+const focusHistory = [
+  { id: 3, label: "Deep work", day: today(), start: `${today()} 09:10:00`, end: `${today()} 10:00:00`, plannedSecs: 3000, actualSecs: 3000, completed: true },
+  { id: 2, label: "Pomodoro", day: addDays(today(), -1), start: `${addDays(today(), -1)} 14:00:00`, end: `${addDays(today(), -1)} 14:25:00`, plannedSecs: 1500, actualSecs: 1500, completed: true },
+  { id: 1, label: "Study session", day: addDays(today(), -1), start: `${addDays(today(), -1)} 19:00:00`, end: `${addDays(today(), -1)} 19:40:00`, plannedSecs: 5400, actualSecs: 2400, completed: false },
+];
+
+let goals: GoalStatus[] = [
+  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h" },
+  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education" },
+  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m" },
+  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions" },
+];
+let nextGoalId = 5;
+
+function stamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function startFocus(plan: FocusPlan): FocusStatus {
+  const start = new Date();
+  const end = new Date(start.getTime() + plan.focusMins * 60000);
+  focusActive = {
+    label: plan.label, phase: "focus", round: 1, rounds: plan.rounds, startedAt: stamp(start), endsAt: stamp(end),
+    remainingSecs: plan.focusMins * 60, totalSecs: plan.focusMins * 60, blockDistracting: plan.blockDistracting, plan,
+  };
+  return focusActive;
+}
+
+function goalLabel(kind: string, cat: string | null, target: number): string {
+  const f = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}h${s % 3600 ? ` ${Math.round((s % 3600) / 60)}m` : ""}` : `${Math.round(s / 60)}m`);
+  if (kind === "max_screen") return `Keep screen time under ${f(target)}`;
+  if (kind === "min_category") return `Spend at least ${f(target)} on ${cat}`;
+  if (kind === "max_category") return `Keep ${cat} under ${f(target)}`;
+  return `Complete ${target} focus session${target === 1 ? "" : "s"}`;
+}
 
 const settings: Settings = {
   paused: false,
@@ -213,6 +265,14 @@ function report(from: string, to: string): Report {
     weekendAvgSecs: avg(days.filter(isWeekend)),
     ...split(cats),
     peakHour: hours.indexOf(Math.max(...hours)),
+    productivity: days.map((d) => ({
+      day: d.day,
+      productiveSecs: Math.round(d.activeSecs * (0.35 + hash(d.day + "p") * 0.2)),
+      neutralSecs: Math.round(d.activeSecs * 0.3),
+      distractingSecs: Math.round(d.activeSecs * (0.15 + hash(d.day + "d") * 0.15)),
+    })),
+    focusSecs: 5400 * Math.min(days.length, 7) / 3,
+    focusSessions: Math.round(Math.min(days.length, 7) * 1.4),
     days,
     apps,
     sites: sitesFor(from, to),
@@ -303,6 +363,43 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "set_break_reminder":
         settings.breakReminderMins = a.mins;
         return null;
+      case "get_installed_apps":
+        return INSTALLED;
+      case "ensure_app":
+        return APPS.find((x) => x[2].toLowerCase() === String(a.exeName).toLowerCase())?.[0] ?? nextAppId++;
+      case "get_focus": {
+        if (focusActive) {
+          const left = Math.max(0, Math.round((new Date(focusActive.endsAt.replace(" ", "T")).getTime() - Date.now()) / 1000));
+          focusActive = { ...focusActive, remainingSecs: left };
+        }
+        return { active: focusActive, todaySecs: 3000, todaySessions: 1, weekSecs: 6900, weekSessions: 2, streakDays: 2, history: focusHistory };
+      }
+      case "start_focus":
+        return startFocus(a.plan);
+      case "stop_focus":
+        focusActive = null;
+        return null;
+      case "get_goals":
+        return goals.map((g) => ({ ...g }));
+      case "set_goal": {
+        const g = args as unknown as GoalStatus;
+        const cat = CATEGORIES.find((c) => c.id === g.categoryId) ?? null;
+        const base = { ...g, category: cat?.name ?? null, color: cat?.color ?? "#6366f1", label: goalLabel(g.kind, cat?.name ?? null, g.target) };
+        if (g.id) goals = goals.map((x) => (x.id === g.id ? { ...x, ...base } : x));
+        else goals.push({ ...base, id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
+        return null;
+      }
+      case "delete_goal":
+        goals = goals.filter((g) => g.id !== a.id);
+        return null;
+      case "get_insights":
+        return [
+          { tone: "warn", text: "Your youtube.com usage increased by 35% this week (6h 10m vs 4h 34m)." },
+          { tone: "good", text: "Your Visual Studio Code usage increased by 28% this week (14h 5m vs 11h)." },
+          { tone: "info", text: "You spend most of your computer time between 2 PM and 6 PM." },
+          { tone: "info", text: "You spent 8h 10m on entertainment, social media and gaming apps this week." },
+          { tone: "good", text: "You completed 6 focus sessions (4h 10m focused) this week. You're on a 2-day focus streak." },
+        ];
       case "set_website_tracking":
         settings.websiteTracking = a.enabled;
         return null;

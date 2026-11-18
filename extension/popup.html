@@ -9,15 +9,23 @@
     <header>
       <img src="icons/32.png" alt="" width="22" height="22" />
       <strong>FocusTrack</strong>
+      <span id="status" class="status"><span class="dot"></span><span id="status-text">Checking…</span></span>
     </header>
-    <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking…</span></div>
-    <dl>
-      <dt>Current site</dt>
-      <dd id="current">—</dd>
-      <dt>Blocked today</dt>
-      <dd id="blocked">None</dd>
-    </dl>
-    <p class="note">Only the domain of your active tab is shared, and only with the FocusTrack app on this computer.</p>
-    <script src="popup.js"></script>
+
+    <section id="focus" class="focus-banner" hidden></section>
+
+    <div class="stats">
+      <div><span class="label">Screen time</span><span id="screen" class="big">—</span></div>
+      <div><span class="label">On the web</span><span id="web" class="big">—</span></div>
+    </div>
+
+    <h2>Top websites today</h2>
+    <div id="sites" class="list"></div>
+
+    <h2>Limits</h2>
+    <div id="limits" class="list"></div>
+
+    <p class="note">Current site: <span id="current">—</span>. Only domains are shared, and only with the FocusTrack app on this computer.</p>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>

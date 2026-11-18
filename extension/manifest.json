@@ -1,22 +1,42 @@
 {
   "manifest_version": 3,
   "name": "FocusTrack",
-  "version": "0.1.0",
-  "description": "Tells the FocusTrack desktop app which website (domain only) is in the active tab. No page content, URLs or history leave your browser.",
-  "permissions": ["tabs", "alarms", "storage"],
-  "host_permissions": ["http://127.0.0.1:17865/*"],
+  "version": "0.2.0",
+  "description": "Shows your FocusTrack screen time on the new tab page and tells the FocusTrack desktop app which website (domain only) is active. No page content, URLs or history leave your computer.",
+  "permissions": [
+    "tabs",
+    "alarms",
+    "storage",
+    "search"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:17865/*"
+  ],
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "action": {
     "default_title": "FocusTrack",
     "default_popup": "popup.html",
-    "default_icon": { "32": "icons/32.png", "128": "icons/128.png" }
+    "default_icon": {
+      "32": "icons/32.png",
+      "128": "icons/128.png"
+    }
   },
-  "icons": { "32": "icons/32.png", "128": "icons/128.png" },
-  "web_accessible_resources": [],
+  "icons": {
+    "32": "icons/32.png",
+    "128": "icons/128.png"
+  },
   "browser_specific_settings": {
-    "gecko": { "id": "focustrack@focustrack.app", "strict_min_version": "121.0" }
+    "gecko": {
+      "id": "focustrack@focustrack.app",
+      "strict_min_version": "121.0"
+    }
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
   }
 }

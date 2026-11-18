@@ -315,3 +315,42 @@ mod tests {
         assert_eq!(average_of_active_days(&[mk(0)]), 0);
     }
 }
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DayKinds {
+    pub day: String,
+    pub productive_secs: i64,
+    pub neutral_secs: i64,
+    pub distracting_secs: i64,
+}
+
+/// App time per day split by category kind (zero-filled).
+pub fn daily_kinds(conn: &Connection, from: NaiveDate, to: NaiveDate) -> rusqlite::Result<Vec<DayKinds>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.day, COALESCE(c.kind, 'neutral'), SUM(s.duration_secs)
+         FROM usage_sessions s JOIN applications a ON a.id = s.app_id
+         LEFT JOIN categories c ON c.id = a.category_id
+         WHERE s.day BETWEEN ?1 AND ?2 GROUP BY 1, 2",
+    )?;
+    let mut map: HashMap<String, DayKinds> = HashMap::new();
+    let rows = stmt.query_map(params![fmt_day(from), fmt_day(to)], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    for row in rows {
+        let (day, kind, secs) = row?;
+        let e = map.entry(day.clone()).or_insert(DayKinds { day, productive_secs: 0, neutral_secs: 0, distracting_secs: 0 });
+        match kind.as_str() {
+            "productive" => e.productive_secs += secs,
+            "distracting" => e.distracting_secs += secs,
+            _ => e.neutral_secs += secs,
+        }
+    }
+    Ok(days_between(from, to)
+        .into_iter()
+        .map(|d| {
+            let key = fmt_day(d);
+            map.remove(&key).unwrap_or(DayKinds { day: key, productive_secs: 0, neutral_secs: 0, distracting_secs: 0 })
+        })
+        .collect())
+}

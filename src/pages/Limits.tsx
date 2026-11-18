@@ -41,23 +41,37 @@ function LimitEditor({
   const from = addDays(today(), -29);
   const apps = useLoad(() => api.apps(from, today()), []);
   const sites = useLoad(() => api.websites(from, today()), []);
+  const installed = useLoad(() => api.installedApps(), []);
+  // "id:<n>" for apps/sites FocusTrack knows, "exe:<name>" for installed apps never used yet.
+  const [pick, setPick] = useState(initial.targetId !== null ? `id:${initial.targetId}` : "");
 
   const taken = new Set(existing.filter((l) => l.targetType === d.targetType).map((l) => l.targetId));
-  const options =
+  const known =
     d.targetType === "app"
-      ? (apps.data ?? []).map((a) => ({ id: a.id, label: a.name, secs: a.secs }))
-      : (sites.data ?? []).map((s) => ({ id: s.id, label: s.domain, secs: s.secs }));
-  const available = options.filter((o) => editing || !taken.has(o.id));
+      ? (apps.data ?? []).map((a) => ({ id: a.id, label: a.name, secs: a.secs, exe: a.exeName.toLowerCase() }))
+      : (sites.data ?? []).map((s) => ({ id: s.id, label: s.domain, secs: s.secs, exe: "" }));
+  const available = known.filter((o) => editing || !taken.has(o.id));
+  const knownExes = new Set(known.map((o) => o.exe));
+  const installedOnly =
+    d.targetType === "app" ? (installed.data ?? []).filter((a) => !knownExes.has(a.exeName.toLowerCase())) : [];
   const limitSecs = d.hours * 3600 + d.minutes * 60;
 
   const save = async () => {
     setError(null);
-    if (d.targetId === null) return setError(`Choose ${d.targetType === "app" ? "an application" : "a website"}.`);
+    if (!pick) return setError(`Choose ${d.targetType === "app" ? "an application" : "a website"}.`);
     if (limitSecs < 60) return setError("The limit must be at least 1 minute.");
     try {
+      let targetId: number;
+      if (pick.startsWith("exe:")) {
+        const app = installedOnly.find((a) => a.exeName === pick.slice(4));
+        if (!app) return setError("That application is no longer available.");
+        targetId = await api.ensureApp(app);
+      } else {
+        targetId = Number(pick.slice(3));
+      }
       await api.setLimit({
         targetType: d.targetType,
-        targetId: d.targetId,
+        targetId,
         dailyLimitSecs: limitSecs,
         warnPct: d.warnPct,
         block: d.targetType === "website" && d.block,
@@ -79,7 +93,10 @@ function LimitEditor({
           {!editing && (
             <Segmented<TargetType>
               value={d.targetType}
-              onChange={(t) => setD({ ...d, targetType: t, targetId: null, block: false })}
+              onChange={(t) => {
+                setD({ ...d, targetType: t, targetId: null, block: false });
+                setPick("");
+              }}
               options={[
                 { value: "website", label: "Website" },
                 { value: "app", label: "Application" },
@@ -88,24 +105,43 @@ function LimitEditor({
           )}
           <label className="block text-sm">
             <span className="mb-1 block text-slate-500">{d.targetType === "app" ? "Application" : "Website"}</span>
-            <select
-              value={d.targetId ?? ""}
-              disabled={editing}
-              onChange={(e) => setD({ ...d, targetId: e.target.value ? Number(e.target.value) : null })}
-              className={cx(field, "w-full")}
-            >
+            <select value={pick} disabled={editing} onChange={(e) => setPick(e.target.value)} className={cx(field, "w-full")}>
               <option value="">Choose…</option>
-              {available.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.label} {o.secs > 0 ? `· ${fmtDuration(o.secs / 30)}/day avg` : ""}
-                </option>
-              ))}
+              {d.targetType === "app" ? (
+                <>
+                  {available.length > 0 && (
+                    <optgroup label="Used on this PC">
+                      {available.map((o) => (
+                        <option key={o.id} value={`id:${o.id}`}>
+                          {o.label} {o.secs > 0 ? `· ${fmtDuration(o.secs / 30)}/day avg` : ""}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {installedOnly.length > 0 && (
+                    <optgroup label="Installed">
+                      {installedOnly.map((a) => (
+                        <option key={a.exeName} value={`exe:${a.exeName}`}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </>
+              ) : (
+                available.map((o) => (
+                  <option key={o.id} value={`id:${o.id}`}>
+                    {o.label} {o.secs > 0 ? `· ${fmtDuration(o.secs / 30)}/day avg` : ""}
+                  </option>
+                ))
+              )}
             </select>
-            {!editing && available.length === 0 && (
+            {d.targetType === "app" && installed.loading && !installed.data && (
+              <span className="mt-1 block text-xs text-slate-500">Looking for installed applications…</span>
+            )}
+            {!editing && d.targetType === "website" && available.length === 0 && (
               <span className="mt-1 block text-xs text-slate-500">
-                {d.targetType === "website"
-                  ? "Websites appear here once the browser extension has recorded them."
-                  : "Applications appear here once they have been used."}
+                Websites appear here once the browser extension has recorded them.
               </span>
             )}
           </label>

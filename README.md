@@ -14,7 +14,7 @@ screenshots, passwords, full URLs or page content.
 | 1 · Core tracking | Foreground app detection, idle/lock/sleep detection, session recording, SQLite, start with Windows, tray | **Implemented** |
 | 2 · Dashboard & analytics | Dashboard, app breakdown & categories, daily/weekly reports, charts, heatmap, history, CSV export, settings | **Implemented** |
 | 3 · Advanced tracking | Browser extension, website tracking & categories, app/website daily limits, website blocking, Windows notifications, break reminders | **Implemented** |
-| 4 · Productivity | Focus mode / Pomodoro, goals, insights | Planned (placeholder screen) |
+| 4 · Productivity | Focus Mode (Pomodoro, presets, custom, distraction blocking, history, streaks), daily goals, productivity reports, activity heatmap, usage insights | **Implemented** |
 | 5 · Advanced | AI insights, streaks, sync | Planned |
 
 ## How tracking works
@@ -46,11 +46,29 @@ The local API (`src-tauri/src/browser.rs`) listens on 127.0.0.1 only and rejects
 - Firefox: `about:debugging` → This Firefox → **Load Temporary Add-on** → `extension/manifest.json`
   (temporary until Firefox restarts; a signed build is needed for permanent install).
 
+**What the extension shows:** its toolbar popup lists today's screen time, web time, top sites and limits, and
+the **new-tab page** is replaced with a FocusTrack dashboard (clock, search with your default engine, top sites,
+limits, goals and any running focus session). Both read `GET /v1/summary` from the desktop app.
+
+## Focus Mode, goals and insights
+
+- **Focus sessions** (`src-tauri/src/focus.rs`): presets for a 25-minute Pomodoro (4 rounds, 5-minute breaks,
+  15-minute long break), 50-minute deep work and a 90-minute study session, or a custom length, breaks and
+  rounds. The timer runs in the backend, so it keeps going with the window closed, and sends a notification
+  at each round, break and finish. Optionally blocks distracting websites (entertainment, social media and
+  gaming, adjusted by your own website categories) during focus rounds only.
+- **Daily goals** (`goals.rs`): cap total screen time, a minimum or maximum for a category (apps + websites),
+  or a number of focus sessions. Notifies once a day when a goal is reached or missed.
+- **Insights** (`insights.rs`): plain-language observations computed locally, such as the biggest
+  week-over-week changes, your busiest hours, distracting time, monthly productive trend and focus streak.
+- **Reports** add a daily productive / neutral / distracting chart.
+
 ## Limits and notifications
 
 `src-tauri/src/limits.rs` checks every 15 s. Each enabled limit notifies once per day at its warning level
 (default 80%) and once when reached. Website limits can also **block** the site: the extension redirects it
-to a "blocked for today" page until midnight. App limits notify but don't close the app. An optional break
+to a "blocked for today" page until midnight. App limits notify but don't close the app. Any installed app can be
+limited, even before first use (`installed.rs` reads Start Menu shortcuts and the installed-programs registry). An optional break
 reminder fires after N minutes of continuous use (a 5-minute gap resets it).
 
 ## Project layout
@@ -64,6 +82,10 @@ src-tauri/src/
   tracker.rs             Background tracking engine: apps, websites, idle (+ tests with a fake OS probe)
   browser.rs             Local HTTP API for the browser extension
   limits.rs              Daily limits, blocklist, notifications, break reminders
+  focus.rs               Focus sessions / Pomodoro engine
+  goals.rs               Daily goals and progress
+  insights.rs            Rule-based usage insights
+  installed.rs           Installed-app discovery (Start Menu .lnk parser + registry)
   platform.rs            Win32 calls (windows-sys)
   db.rs                  SQLite schema, migrations, writes
   analytics.rs           Aggregations: totals, per-day, per-app, hourly, heatmap, sessions

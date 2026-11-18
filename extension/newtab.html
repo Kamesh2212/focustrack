@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>New Tab</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="newtab">
+    <main>
+      <div class="clock">
+        <div id="time" class="time-now">--:--</div>
+        <div id="date" class="muted"></div>
+      </div>
+
+      <form id="search" class="search" role="search">
+        <input id="q" type="search" placeholder="Search the web" aria-label="Search the web" autocomplete="off" autofocus />
+      </form>
+
+      <section id="focus" class="focus-banner" hidden></section>
+
+      <section id="offline" class="card offline" hidden>
+        The FocusTrack app isn't running, so today's usage isn't available.
+      </section>
+
+      <section id="usage" class="grid" hidden>
+        <div class="card stats-card">
+          <div><span class="label">Screen time today</span><span id="screen" class="big">—</span></div>
+          <div><span class="label">Active</span><span id="active" class="mid">—</span></div>
+          <div><span class="label">On the web</span><span id="web" class="mid">—</span></div>
+          <div><span class="label">Focused</span><span id="focused" class="mid">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Top websites today</h2>
+          <div id="sites" class="list"></div>
+        </div>
+        <div class="card">
+          <h2>Limits</h2>
+          <div id="limits" class="list"></div>
+        </div>
+        <div class="card">
+          <h2>Today's goals</h2>
+          <div id="goals" class="list"></div>
+        </div>
+      </section>
+      <p class="note center">FocusTrack · your usage stays on this computer</p>
+    </main>
+    <script type="module" src="newtab.js"></script>
+  </body>
+</html>

@@ -3,7 +3,8 @@ import { api } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import { dayLabel, fmtDuration, pctChange, rangeFor, today, type RangeKey } from "../lib/format";
 import { Card, DateInput, ErrorNote, PageHeader, RangePicker, Stat } from "../components/ui";
-import { CategoryDonut, DailyChart, Heatmap, HourlyChart } from "../components/charts";
+import { CategoryDonut, DailyChart, Heatmap, HourlyChart, ProductivityChart } from "../components/charts";
+import { InsightList } from "../components/Insights";
 import { AppList } from "../components/AppList";
 import { SiteList } from "../components/SiteList";
 
@@ -12,6 +13,7 @@ export default function Reports() {
   const [custom, setCustom] = useState(rangeFor("7d"));
   const { from, to } = rangeFor(range, custom);
   const { data: r, error } = useLoad(() => api.report(from, to), [from, to]);
+  const insights = useLoad(() => api.insights(), []);
 
   const change = r ? pctChange(r.activeSecs, r.prevActiveSecs) : null;
   const productivePct = r && r.activeSecs ? Math.round((r.productiveSecs / r.activeSecs) * 100) : 0;
@@ -64,6 +66,29 @@ export default function Reports() {
             </Card>
             <Card title="Categories">
               <CategoryDonut categories={r.categories} />
+            </Card>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <Card
+              className="lg:col-span-2"
+              title="Productivity"
+              action={
+                <span className="tabular text-xs text-slate-500">
+                  Focused {fmtDuration(r.focusSecs)} · {r.focusSessions} session{r.focusSessions === 1 ? "" : "s"}
+                </span>
+              }
+            >
+              <ProductivityChart days={r.productivity} height={multiDay ? 220 : 160} />
+              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+                <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-emerald-500" />Productive</span>
+                <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-slate-400" />Neutral</span>
+                <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-rose-500" />Distracting</span>
+                <span className="ml-auto">Based on app categories</span>
+              </div>
+            </Card>
+            <Card title="Insights">
+              <InsightList insights={insights.data ?? []} />
             </Card>
           </div>
 
