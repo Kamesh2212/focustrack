@@ -14,7 +14,8 @@ pub struct ForegroundApp {
 
 pub use imp::{
     audible_exes, close_windows, controller_idle_seconds, file_description, foreground_app,
-    foreground_pid, idle_seconds, is_session_locked, process_image, processes, terminate,
+    foreground_pid, idle_seconds, is_elevated, is_session_locked, original_file_name,
+    process_image, processes, run_elevated, terminate,
 };
 
 /// Returns the last path component (`C:\a\b.exe` -> `b.exe`).
@@ -28,7 +29,18 @@ pub fn pretty_exe_name(exe_name: &str) -> String {
         .strip_suffix(".exe")
         .or_else(|| exe_name.strip_suffix(".EXE"))
         .unwrap_or(exe_name);
-    stem.split(['_', '-', ' '])
+    // Split CamelCase ("GenshinImpact" -> "Genshin Impact") before separators.
+    let mut spaced = String::new();
+    let chars: Vec<char> = stem.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        let prev_lower = i > 0 && chars[i - 1].is_lowercase();
+        if c.is_uppercase() && prev_lower {
+            spaced.push(' ');
+        }
+        spaced.push(*c);
+    }
+    spaced
+        .split(['_', '-', ' '])
         .filter(|w| !w.is_empty())
         .map(|w| {
             let mut c = w.chars();
@@ -360,9 +372,77 @@ mod imp {
         }
     }
 
+    /// Whether FocusTrack itself is running with administrator rights.
+    pub fn is_elevated() -> bool {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+            let mut token = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return false;
+            }
+            let mut info = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            CloseHandle(token);
+            ok != 0 && info.TokenIsElevated != 0
+        }
+    }
+
+    /// Runs a program with the Windows administrator prompt (UAC) and waits
+    /// for it. Returns its exit code, or None if the user said no.
+    pub fn run_elevated(file: &str, args: &str) -> Option<u32> {
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+        };
+        use windows_sys::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        };
+        let verb = to_wide("runas");
+        let file = to_wide(file);
+        let params = to_wide(args);
+        unsafe {
+            let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+            info.fMask = SEE_MASK_NOCLOSEPROCESS;
+            info.lpVerb = verb.as_ptr();
+            info.lpFile = file.as_ptr();
+            info.lpParameters = params.as_ptr();
+            info.nShow = 0; // SW_HIDE
+            if ShellExecuteExW(&mut info) == 0 || info.hProcess.is_null() {
+                return None;
+            }
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code = 1u32;
+            GetExitCodeProcess(info.hProcess, &mut code);
+            CloseHandle(info.hProcess);
+            Some(code)
+        }
+    }
+
     /// Reads the `FileDescription` from the exe's version resource
     /// (e.g. `chrome.exe` -> "Google Chrome").
     pub fn file_description(path: &str) -> Option<String> {
+        version_field(path, "FileDescription")
+    }
+
+    /// The exe's original file name from its version resource; survives the
+    /// file being renamed (used to recognise renamed copies of limited apps).
+    pub fn original_file_name(path: &str) -> Option<String> {
+        version_field(path, "OriginalFilename")
+            .map(|n| n.trim().to_ascii_lowercase())
+            .filter(|n| n.ends_with(".exe"))
+    }
+
+    fn version_field(path: &str, field: &str) -> Option<String> {
         unsafe {
             let wide = to_wide(path);
             let mut handle = 0u32;
@@ -392,7 +472,7 @@ mod imp {
 
             for (lang, cp) in langs {
                 let key = to_wide(&format!(
-                    "\\StringFileInfo\\{:04x}{:04x}\\FileDescription",
+                    "\\StringFileInfo\\{:04x}{:04x}\\{field}",
                     lang, cp
                 ));
                 let mut p: *mut c_void = null_mut();
@@ -430,6 +510,15 @@ mod imp {
     pub fn audible_exes() -> std::collections::HashSet<String> {
         Default::default()
     }
+    pub fn original_file_name(_path: &str) -> Option<String> {
+        None
+    }
+    pub fn is_elevated() -> bool {
+        false
+    }
+    pub fn run_elevated(_file: &str, _args: &str) -> Option<u32> {
+        None
+    }
     pub fn controller_idle_seconds() -> u64 {
         u64::MAX
     }
@@ -466,6 +555,18 @@ mod tests {
 
     /// Manual check on a real PC: `cargo test audible -- --ignored --nocapture`
     /// while something is playing sound.
+    /// Manual check: `FT_PID=1234 cargo test inspect_pid -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn inspect_pid() {
+        let pid: u32 = std::env::var("FT_PID").unwrap().parse().unwrap();
+        println!("image: {:?}", process_image(pid));
+        println!(
+            "snapshot name: {:?}",
+            processes().into_iter().find(|p| p.0 == pid)
+        );
+    }
+
     #[test]
     #[ignore]
     fn audible_apps_now() {
@@ -477,5 +578,7 @@ mod tests {
     fn pretty_names() {
         assert_eq!(pretty_exe_name("my_cool-app.exe"), "My Cool App");
         assert_eq!(pretty_exe_name("discord.exe"), "Discord");
+        assert_eq!(pretty_exe_name("GenshinImpact.exe"), "Genshin Impact");
+        assert_eq!(pretty_exe_name("HYP.exe"), "HYP");
     }
 }

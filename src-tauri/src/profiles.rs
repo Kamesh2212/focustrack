@@ -56,6 +56,14 @@ pub struct AppRef {
     pub name: String,
     pub exe_name: String,
     pub category: String,
+    /// Full path when known; identifies generic exes and launcher folders.
+    pub path: Option<String>,
+}
+
+impl AppRef {
+    pub fn target(&self) -> crate::identity::Target {
+        crate::identity::Target::new(&self.name, &self.exe_name, self.path.as_deref())
+    }
 }
 
 /// What a profile will do, shown before a session starts.
@@ -159,37 +167,49 @@ fn candidate_apps(
 ) -> rusqlite::Result<BTreeMap<String, AppRef>> {
     let mut out = BTreeMap::new();
     let mut stmt = conn.prepare(
-        "SELECT a.exe_name, a.display_name, COALESCE(c.name, 'Other') FROM applications a
-         LEFT JOIN categories c ON c.id = a.category_id",
+        "SELECT a.app_key, a.exe_name, a.display_name, COALESCE(c.name, 'Other'), a.exe_path
+         FROM applications a LEFT JOIN categories c ON c.id = a.category_id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
         ))
     })?;
     for row in rows {
-        let (exe, name, category) = row?;
+        let (key, exe, name, category, path) = row?;
         out.insert(
-            exe.to_ascii_lowercase(),
+            key,
             AppRef {
                 name,
                 exe_name: exe,
                 category,
+                path: path.filter(|p| !p.is_empty()),
             },
         );
     }
     for a in installed {
-        out.entry(a.exe_name.to_ascii_lowercase())
+        let exe = a.exe_name.to_ascii_lowercase();
+        let category = match default_category_for(&exe) {
+            "Other" => crate::identity::category_from_path(&a.path).unwrap_or("Other"),
+            c => c,
+        };
+        out.entry(crate::identity::app_key(&a.exe_name, &a.path))
             .or_insert_with(|| AppRef {
                 name: a.name.clone(),
                 exe_name: a.exe_name.clone(),
-                category: default_category_for(&a.exe_name.to_ascii_lowercase()).to_string(),
+                category: category.to_string(),
+                path: Some(a.path.clone()).filter(|p| !p.is_empty()),
             });
     }
     // Browsers are filtered per website; core Windows tools are never blocked.
-    out.retain(|k, _| browser_family(k).is_none() && !is_protected_name(k));
+    out.retain(|_, a| {
+        let exe = a.exe_name.to_ascii_lowercase();
+        browser_family(&exe).is_none() && !is_protected_name(&exe)
+    });
     Ok(out)
 }
 
@@ -220,8 +240,9 @@ pub fn resolve(
 ) -> rusqlite::Result<BlockPreview> {
     let apps = candidate_apps(conn, installed)?;
     let listed: BTreeSet<String> = p.apps.iter().map(|a| a.to_ascii_lowercase()).collect();
-    let selected =
-        |exe: &String, a: &AppRef| p.categories.contains(&a.category) || listed.contains(exe);
+    let selected = |_key: &String, a: &AppRef| {
+        p.categories.contains(&a.category) || listed.contains(&a.exe_name.to_ascii_lowercase())
+    };
     let mut sites = domains_in(conn, &p.categories)?;
     sites.extend(p.sites.iter().map(|s| s.to_ascii_lowercase()));
 

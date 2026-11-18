@@ -63,6 +63,12 @@ pub struct Shared {
     /// These keep counting while tracking is paused (so pausing can't be
     /// used to get around a limit).
     pub limited: Mutex<HashSet<String>>,
+    /// Apps with an enabled usage limit, recognised by identity (#5).
+    pub limited_apps: Mutex<Vec<crate::identity::Target>>,
+    /// Apps the blocker couldn't close because they run as administrator.
+    pub needs_admin: Mutex<HashSet<String>>,
+    /// Another FocusTrack start asked this one to show its window.
+    pub show_requested: AtomicBool,
     /// Domains the extensions should block (limit reached, blocking on).
     pub blocklist: Mutex<Vec<String>>,
     /// Distracting domains blocked while a focus round is running.
@@ -92,6 +98,9 @@ impl Shared {
             }),
             browsers: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashSet::new()),
+            limited_apps: Mutex::new(Vec::new()),
+            needs_admin: Mutex::new(HashSet::new()),
+            show_requested: AtomicBool::new(false),
             blocklist: Mutex::new(Vec::new()),
             focus_blocklist: Mutex::new(Vec::new()),
             focus_allow_sites: Mutex::new(None),
@@ -213,6 +222,8 @@ pub struct Tracker<P: Probe> {
     apps: HashMap<String, (i64, String)>,
     /// When each app (lower-case exe) was last heard playing sound.
     last_audible: HashMap<String, NaiveDateTime>,
+    /// Version-resource original file names, by lower-case path.
+    originals: HashMap<String, Option<String>>,
     sites: HashMap<String, i64>,
     last_tick: NaiveDateTime,
     ticks: u64,
@@ -229,6 +240,7 @@ impl<P: Probe> Tracker<P> {
             site: None,
             apps: HashMap::new(),
             last_audible: HashMap::new(),
+            originals: HashMap::new(),
             sites: HashMap::new(),
             last_tick: start,
             ticks: 0,
@@ -327,7 +339,7 @@ impl<P: Probe> Tracker<P> {
                 });
             }
             Some(app) => {
-                let record_app = !paused || self.is_limited_app(&app.exe_name);
+                let record_app = !paused || self.is_limited_app(&app);
                 let same = self
                     .active
                     .as_ref()
@@ -388,13 +400,25 @@ impl<P: Probe> Tracker<P> {
         self.maybe_flush();
     }
 
-    fn is_limited_app(&self, exe_name: &str) -> bool {
-        let exe = exe_name.to_ascii_lowercase();
-        self.shared
-            .limited
-            .lock()
-            .map(|l| l.contains(&exe))
-            .unwrap_or(false)
+    /// The limit this app falls under, if any (by name, path, launcher folder
+    /// or the original name of a renamed copy).
+    fn limited_target(&mut self, app: &ForegroundApp) -> Option<crate::identity::Target> {
+        let exe = app.exe_name.to_ascii_lowercase();
+        let path = app.exe_path.to_ascii_lowercase();
+        let original = self
+            .originals
+            .entry(path.clone())
+            .or_insert_with(|| platform::original_file_name(&path))
+            .clone();
+        let targets = self.shared.limited_apps.lock().ok()?;
+        targets
+            .iter()
+            .find(|t| t.matches(&exe, Some(&path), original.as_deref()))
+            .cloned()
+    }
+
+    fn is_limited_app(&mut self, app: &ForegroundApp) -> bool {
+        self.limited_target(app).is_some()
     }
 
     /// A limit on `youtube.com` also covers `m.youtube.com`.
@@ -567,14 +591,25 @@ impl<P: Probe> Tracker<P> {
     }
 
     fn open_usage(&mut self, app: &ForegroundApp, now: NaiveDateTime) -> Option<ActiveSpan> {
-        let key = app.exe_name.to_ascii_lowercase();
+        // A renamed copy of a limited app counts as that app (#5).
+        let exe_name = match self.limited_target(app) {
+            Some(t)
+                if !t.generic
+                    && t.scope.is_none()
+                    && t.exe != app.exe_name.to_ascii_lowercase() =>
+            {
+                t.exe
+            }
+            _ => app.exe_name.clone(),
+        };
+        let key = crate::identity::app_key(&exe_name, &app.exe_path);
         let (app_id, name) = match self.apps.get(&key) {
             Some(v) => v.clone(),
             None => {
                 let probe = &mut self.probe;
                 let found = db::get_or_create_app(
                     &self.conn,
-                    &app.exe_name,
+                    &exe_name,
                     &app.exe_path,
                     || {
                         probe
@@ -841,7 +876,12 @@ mod tests {
             .limited
             .lock()
             .unwrap()
-            .extend(["steam.exe".to_string(), "youtube.com".to_string()]);
+            .insert("youtube.com".to_string());
+        t.shared
+            .limited_apps
+            .lock()
+            .unwrap()
+            .push(crate::identity::Target::new("Steam", "steam.exe", None));
         t.shared.paused.store(true, Ordering::SeqCst);
 
         t.probe.app = Some("steam.exe"); // limited app: counts

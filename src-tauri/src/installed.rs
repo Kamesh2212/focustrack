@@ -253,7 +253,7 @@ fn add(map: &mut HashMap<String, InstalledApp>, path: &str, name: &str, check_ex
     if check_exists && !Path::new(path).exists() {
         return;
     }
-    map.entry(exe.to_ascii_lowercase())
+    map.entry(crate::identity::app_key(&exe, path))
         .or_insert_with(|| InstalledApp {
             exe_name: exe,
             name: name.to_string(),

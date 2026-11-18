@@ -42,9 +42,32 @@ pub fn default_category_for(exe_lower: &str) -> &'static str {
 
         "instagram" | "facebook" | "twitter" | "x" | "tiktok" | "reddit" => "Social Media",
 
-        "steam" | "steamwebhelper" | "epicgameslauncher" | "battle.net" | "riotclientservices"
-        | "leagueclient" | "valorant" | "minecraft" | "javaw" | "robloxplayerbeta"
-        | "gog galaxy" | "xboxapp" | "gamebar" => "Gaming",
+        "steam"
+        | "steamwebhelper"
+        | "epicgameslauncher"
+        | "battle.net"
+        | "riotclientservices"
+        | "leagueclient"
+        | "valorant"
+        | "minecraft"
+        | "minecraftlauncher"
+        | "robloxplayerbeta"
+        | "gog galaxy"
+        | "xboxapp"
+        | "gamebar"
+        | "genshinimpact"
+        | "yuanshen"
+        | "starrail"
+        | "zenlesszonezero"
+        | "hyp"
+        | "bh3"
+        | "wutheringwaves"
+        | "fortnitelauncher"
+        | "fortniteclient-win64-shipping"
+        | "eadesktop"
+        | "ubisoftconnect"
+        | "upc"
+        | "galaxyclient" => "Gaming",
 
         _ => "Other",
     }
@@ -226,6 +249,12 @@ mod tests {
         assert_eq!(default_category_for("winword.exe"), "Productivity");
         assert_eq!(default_category_for("discord.exe"), "Communication");
         assert_eq!(default_category_for("steam.exe"), "Gaming");
+        assert_eq!(default_category_for("genshinimpact.exe"), "Gaming");
+        assert_eq!(
+            default_category_for("javaw.exe"),
+            "Other",
+            "Java apps aren't all games"
+        );
         assert_eq!(default_category_for("something-new.exe"), "Other");
     }
 

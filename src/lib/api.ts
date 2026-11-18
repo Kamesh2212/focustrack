@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AdminMode,
   AppUsage,
   BrowserStatus,
   Category,
@@ -85,6 +86,9 @@ export const api = {
   deleteResource: (id: number) => call<void>("delete_resource", { id }),
   openUrl: (url: string) => call<void>("open_url", { url }),
   studyTime: () => call<[number, number]>("get_study_time"),
+  adminMode: () => call<AdminMode>("get_admin_mode"),
+  enableAdminMode: () => call<void>("enable_admin_mode"),
+  disableAdminMode: () => call<void>("disable_admin_mode"),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

@@ -12,7 +12,7 @@ use crate::blocker::AppBlocks;
 use crate::db;
 use crate::installed;
 use crate::limits::notify;
-use crate::profiles::{self, BlockPreview, Profile};
+use crate::profiles::{self, AppRef, BlockPreview, Profile};
 use crate::tracker::Shared;
 use chrono::{Duration, Local, NaiveDateTime, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -295,22 +295,13 @@ fn apply_blocks(shared: &Shared, active: Option<&ActiveFocus>) {
             );
             let blocks = if p.mode == "allow_only" {
                 AppBlocks {
-                    allow_only: Some(
-                        p.allowed_apps
-                            .iter()
-                            .map(|x| x.exe_name.to_ascii_lowercase())
-                            .collect(),
-                    ),
+                    allow_only: Some(p.allowed_apps.iter().map(AppRef::target).collect()),
                     focus_label: Some(label),
                     ..Default::default()
                 }
             } else {
                 AppBlocks {
-                    focus: p
-                        .blocked_apps
-                        .iter()
-                        .map(|x| (x.exe_name.to_ascii_lowercase(), x.name.clone()))
-                        .collect(),
+                    focus: p.blocked_apps.iter().map(AppRef::target).collect(),
                     focus_label: Some(label),
                     ..Default::default()
                 }
@@ -659,6 +650,14 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                     break;
                 }
                 ticks += 1;
+                if shared.show_requested.swap(false, Ordering::SeqCst) {
+                    use tauri::Manager;
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.unminimize();
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
                 match tick(&conn, &shared, now(), ticks.is_multiple_of(15)) {
                     Ok(Some((title, body))) => {
                         if shared.notifications_enabled.load(Ordering::SeqCst) {
@@ -782,7 +781,8 @@ mod tests {
             .lock()
             .unwrap()
             .focus
-            .contains_key("steam.exe"));
+            .iter()
+            .any(|t| t.exe == "steam.exe"));
 
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
         let n = tick(&conn, &shared, t0 + Duration::seconds(60), false)
@@ -795,7 +795,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .focus
-                .contains_key("steam.exe"),
+                .iter()
+                .any(|t| t.exe == "steam.exe"),
             "still blocked during the break"
         );
 

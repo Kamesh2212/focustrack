@@ -47,6 +47,17 @@ pub struct LimitStatus {
     /// Extra time granted by overrides today.
     pub extra_secs: i64,
     pub overrides_used: i64,
+    /// App limits: the exe's path (empty if unknown).
+    pub path: String,
+    /// Launcher limits: the folder whose programs this limit also covers.
+    pub scope: Option<String>,
+}
+
+impl LimitStatus {
+    /// How the blocker and tracker recognise this limit's processes.
+    pub fn target(&self) -> crate::identity::Target {
+        crate::identity::Target::new(&self.name, &self.key, Some(&self.path))
+    }
 }
 
 impl LimitStatus {
@@ -75,10 +86,12 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
                 CASE l.target_type
                   WHEN 'app' THEN (SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions
                                    WHERE app_id = l.target_id AND day = ?1)
-                  ELSE (SELECT COALESCE(SUM(duration_secs), 0) FROM website_sessions
-                        WHERE website_id = l.target_id AND day = ?1)
+                  -- A limit on youtube.com also counts m.youtube.com (#8).
+                  ELSE (SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
+                        JOIN websites w2 ON w2.id = s.website_id
+                        WHERE s.day = ?1 AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
                 END,
-                COALESCE(o.extra_secs, 0), COALESCE(o.count, 0)
+                COALESCE(o.extra_secs, 0), COALESCE(o.count, 0), COALESCE(a.exe_path, '')
          FROM usage_limits l
          LEFT JOIN applications a ON l.target_type = 'app' AND a.id = l.target_id
          LEFT JOIN categories ca ON ca.id = a.category_id
@@ -102,10 +115,26 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
             used_secs: r.get(10)?,
             extra_secs: r.get(11)?,
             overrides_used: r.get(12)?,
+            path: r.get(13)?,
+            scope: None,
         })
     })?;
-    let out = rows.collect();
-    out
+    let mut out: Vec<LimitStatus> = rows.collect::<Result<_, _>>()?;
+    // Launcher limits also count every program installed under the launcher's
+    // folder (HoYoPlay's launcher.exe → GenshinImpact.exe) (#5).
+    for l in out.iter_mut().filter(|l| l.target_type == "app") {
+        l.scope = crate::identity::scope_dir(&l.key, &l.path);
+        if let Some(scope) = &l.scope {
+            l.used_secs = conn.query_row(
+                "SELECT COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
+                 JOIN applications a ON a.id = s.app_id
+                 WHERE s.day = ?1 AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
+                params![day, l.target_id, scope],
+                |r| r.get(0),
+            )?;
+        }
+    }
+    Ok(out)
 }
 
 /// Extends a limit by 15 minutes for today, if overrides remain.
@@ -328,8 +357,15 @@ fn check(
     if let Ok(mut l) = shared.limited.lock() {
         *l = limits
             .iter()
-            .filter(|l| l.enabled && !l.key.is_empty())
+            .filter(|l| l.enabled && l.target_type == "website" && !l.key.is_empty())
             .map(|l| l.key.to_ascii_lowercase())
+            .collect();
+    }
+    if let Ok(mut l) = shared.limited_apps.lock() {
+        *l = limits
+            .iter()
+            .filter(|l| l.enabled && l.target_type == "app" && !l.key.is_empty())
+            .map(LimitStatus::target)
             .collect();
     }
 
@@ -348,7 +384,7 @@ fn check(
             .filter(|(l, _)| {
                 l.target_type == "app" && !blocker::is_protected_name(&l.key.to_ascii_lowercase())
             })
-            .map(|(l, from)| (l.key.to_ascii_lowercase(), (l.name.clone(), *from)))
+            .map(|(l, from)| (l.target(), *from))
             .collect();
     }
 
@@ -444,6 +480,8 @@ mod tests {
             used_secs: used,
             extra_secs: 0,
             overrides_used: 0,
+            path: String::new(),
+            scope: None,
         }
     }
 
@@ -578,5 +616,49 @@ mod tests {
         assert_eq!(n.title, "1 goal left today");
         assert_eq!(n.body, "Read 20 pages");
         assert!(goal_reminder(&goals, at(21, 0), "").is_none(), "off");
+    }
+
+    #[test]
+    fn launcher_limits_count_their_games_and_site_limits_their_subdomains() {
+        let conn = db::open_in_memory().unwrap();
+        let (launcher, _) = db::get_or_create_app(
+            &conn,
+            "launcher.exe",
+            r"C:\Program Files\HoYoPlay\launcher.exe",
+            || "x".into(),
+            at(9, 0),
+        )
+        .unwrap();
+        let (game, _) = db::get_or_create_app(
+            &conn,
+            "GenshinImpact.exe",
+            r"C:\Program Files\HoYoPlay\games\Genshin Impact game\GenshinImpact.exe",
+            || "Genshin Impact".into(),
+            at(9, 0),
+        )
+        .unwrap();
+        for (app, h, mins) in [(launcher, 9, 1), (game, 10, 40)] {
+            let id = db::insert_usage(&conn, app, at(h, 0)).unwrap();
+            db::update_span(&conn, db::SpanKind::Usage, id, at(h, 0), at(h, mins)).unwrap();
+        }
+        let yt = db::get_or_create_website(&conn, "youtube.com", at(9, 0)).unwrap();
+        let m = db::get_or_create_website(&conn, "m.youtube.com", at(9, 0)).unwrap();
+        for (site, h) in [(yt, 11), (m, 12)] {
+            let id = db::insert_website_session(&conn, site, "chrome", at(h, 0)).unwrap();
+            db::update_span(&conn, db::SpanKind::Website, id, at(h, 0), at(h, 10)).unwrap();
+        }
+        conn.execute("INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action) VALUES ('app', ?1, 1800, 'block')", params![launcher]).unwrap();
+        conn.execute("INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action) VALUES ('website', ?1, 3600, 'notify')", params![yt]).unwrap();
+
+        let ls = limit_status(&conn, "2026-11-18").unwrap();
+        assert_eq!(ls[0].used_secs, 41 * 60, "launcher + game");
+        assert!(ls[0].scope.as_deref().unwrap().ends_with(r"\hoyoplay\"));
+        assert!(ls[0].exceeded());
+        assert!(ls[0].target().matches(
+            "genshinimpact.exe",
+            Some(r"c:\program files\hoyoplay\games\genshin impact game\genshinimpact.exe"),
+            None
+        ));
+        assert_eq!(ls[1].used_secs, 20 * 60, "youtube.com + m.youtube.com");
     }
 }
