@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Pause, Lock, Moon, Activity, Brain, Coffee, ArrowDown, ArrowUp, LayoutGrid } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Pause, Lock, Moon, Activity, Brain, Coffee, GripVertical, LayoutGrid } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad, useNow } from "../lib/hooks";
 import { fmtDuration, pctChange } from "../lib/format";
@@ -107,37 +107,113 @@ function parseLayout(raw: string): Layout {
 
 const go = (page: string) => window.dispatchEvent(new CustomEvent("ft-navigate", { detail: page }));
 
+/** Moves the item with `id` to position `to`. */
+function moveTo(list: Layout, id: string, to: number): Layout {
+  const from = list.findIndex((x) => x.id === id);
+  if (from < 0 || to < 0 || to >= list.length || from === to) return list;
+  const next = [...list];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
 function Customizer({ layout, onChange }: { layout: Layout; onChange: (l: Layout) => void }) {
-  const move = (i: number, d: number) => {
-    const j = i + d;
-    if (j < 0 || j >= layout.length) return;
-    const next = [...layout];
-    [next[i], next[j]] = [next[j], next[i]];
-    onChange(next);
+  // While dragging, `draft` holds the live order; it is saved on release.
+  const [draft, setDraft] = useState<Layout | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const list = draft ?? layout;
+
+  const startDrag = (e: ReactPointerEvent<HTMLLIElement>, id: string) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("input")) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    let current = layout;
+    let dragging = false;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging) {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
+        dragging = true;
+        setDragId(id);
+      }
+      ev.preventDefault();
+      const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-widget]");
+      const overId = over?.dataset.widget;
+      if (!overId || overId === id || !listRef.current?.contains(over)) return;
+      current = moveTo(current, id, current.findIndex((x) => x.id === overId));
+      setDraft(current);
+    };
+    const finish = (save: boolean) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (dragging && save) {
+        onChange(current);
+        // Releasing over a label would otherwise toggle its checkbox.
+        const swallow = (ev: MouseEvent) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+        };
+        window.addEventListener("click", swallow, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+      }
+      setDraft(null);
+      setDragId(null);
+    };
+    const onUp = () => finish(true);
+    const onCancel = () => finish(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   };
+
+  const onKey = (e: KeyboardEvent, i: number, id: string) => {
+    const d = e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : 0;
+    if (!d) return;
+    e.preventDefault();
+    onChange(moveTo(layout, id, i + d));
+  };
+
   return (
     <Card title="Customize your dashboard" className="mb-4 border-indigo-200 dark:border-indigo-900">
-      <p className="mb-3 text-sm text-slate-500">Choose which sections to show and their order.</p>
-      <ul className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
-        {layout.map((item, i) => (
-          <li key={item.id} className="flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm dark:border-slate-700">
-            <input
-              type="checkbox"
-              id={`dw-${item.id}`}
-              checked={item.visible}
-              onChange={(e) => onChange(layout.map((x) => (x.id === item.id ? { ...x, visible: e.target.checked } : x)))}
-            />
-            <label htmlFor={`dw-${item.id}`} className="flex-1 truncate">
-              {WIDGETS.find((w) => w.id === item.id)?.title}
-            </label>
-            <button onClick={() => move(i, -1)} className="rounded p-0.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move up">
-              <ArrowUp size={14} />
-            </button>
-            <button onClick={() => move(i, 1)} className="rounded p-0.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move down">
-              <ArrowDown size={14} />
-            </button>
-          </li>
-        ))}
+      <p className="mb-3 text-sm text-slate-500">Choose which sections to show, and drag them into the order you want.</p>
+      <ul ref={listRef} className={cx("grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3", dragId && "cursor-grabbing select-none")}>
+        {list.map((item, i) => {
+          const title = WIDGETS.find((w) => w.id === item.id)?.title;
+          return (
+            <li
+              key={item.id}
+              data-widget={item.id}
+              onPointerDown={(e) => startDrag(e, item.id)}
+              className={cx(
+                "flex touch-none items-center gap-2 rounded-lg border px-2 py-1.5 text-sm transition-colors",
+                dragId ? "" : "cursor-grab",
+                dragId === item.id
+                  ? "border-indigo-400 bg-indigo-50 shadow-md ring-2 ring-indigo-300 dark:border-indigo-500 dark:bg-indigo-950/60 dark:ring-indigo-700"
+                  : "border-slate-200 dark:border-slate-700",
+              )}
+            >
+              <button
+                type="button"
+                onKeyDown={(e) => onKey(e, i, item.id)}
+                className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+                aria-label={`Reorder ${title} (drag, or use the arrow keys)`}
+                title="Drag to reorder"
+              >
+                <GripVertical size={14} />
+              </button>
+              <input
+                type="checkbox"
+                id={`dw-${item.id}`}
+                checked={item.visible}
+                onChange={(e) => onChange(layout.map((x) => (x.id === item.id ? { ...x, visible: e.target.checked } : x)))}
+              />
+              <label htmlFor={`dw-${item.id}`} className={cx("flex-1 truncate", dragId ? "cursor-grabbing" : "cursor-grab")}>
+                {title}
+              </label>
+            </li>
+          );
+        })}
       </ul>
     </Card>
   );
