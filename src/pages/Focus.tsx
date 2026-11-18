@@ -6,6 +6,7 @@ import type { FocusRecord } from "../lib/types";
 import { Card, Empty, ErrorNote, PageHeader, Stat, cx } from "../components/ui";
 import { GoalManager } from "../components/Goals";
 import { ActiveSession, FOCUS_PRESETS, ProfileManager, SessionStarter } from "../components/Session";
+import { FocusMusicCard } from "../components/FocusMusic";
 
 export function SessionHistory({ items }: { items: FocusRecord[] }) {
   if (!items.length) return <Empty>Completed sessions will show up here.</Empty>;
@@ -66,6 +67,10 @@ export default function Focus() {
           <SessionStarter mode="focus" presets={FOCUS_PRESETS} defaultProfile="Work Mode" onStarted={reload} />
         )}
       </Card>
+
+      <div className="mt-4">
+        <FocusMusicCard />
+      </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <ProfileManager />

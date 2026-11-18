@@ -7,6 +7,7 @@ import { Button, Card, Empty, ErrorNote, PageHeader, Stat } from "../components/
 import { ActiveSession, SessionStarter, type Preset } from "../components/Session";
 import { NotesPanel } from "../components/NotesPanel";
 import { SessionHistory } from "./Focus";
+import { FocusMusicCard } from "../components/FocusMusic";
 
 const STUDY_PRESETS: Preset[] = [
   { id: "pomodoro", title: "Pomodoro", desc: "4 × 25 min with short breaks", plan: { label: "Study", focusMins: 25, breakMins: 5, longBreakMins: 15, rounds: 4 } },
@@ -121,6 +122,10 @@ export default function Study() {
           <SessionStarter mode="study" presets={STUDY_PRESETS} defaultProfile="Study Mode" subjects={subjects} onStarted={reload} />
         )}
       </Card>
+
+      <div className="mt-4">
+        <FocusMusicCard />
+      </div>
 
       <Card
         className="mt-4"

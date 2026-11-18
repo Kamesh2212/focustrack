@@ -24,6 +24,7 @@ import Limits from "./pages/Limits";
 import Focus from "./pages/Focus";
 import Study from "./pages/Study";
 import Notes from "./pages/Notes";
+import { useMusicController } from "./components/FocusMusic";
 import Settings from "./pages/Settings";
 
 type PageId = "dashboard" | "applications" | "websites" | "reports" | "focus" | "study" | "notes" | "limits" | "history" | "settings";
@@ -69,6 +70,7 @@ function initialPage(): PageId {
 
 export default function App() {
   const [page, setPage] = useState<PageId>(initialPage);
+  useMusicController();
   const [, setTheme] = useTheme();
 
   const go = (id: PageId) => {

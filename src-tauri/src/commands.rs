@@ -879,19 +879,72 @@ pub fn delete_profile(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     crate::profiles::delete(&conn, id).map_err(err)
 }
 
+/// Starts a session, then pops up the focus timer and a notification.
+/// Async: creating a window from a synchronous command can deadlock on Windows.
 #[tauri::command]
-pub fn start_focus(
+pub async fn start_focus(
+    app: AppHandle,
     state: State<'_, AppState>,
     plan: crate::focus::FocusPlan,
 ) -> CmdResult<crate::focus::FocusStatus> {
-    let conn = conn!(state);
-    crate::focus::start(&conn, &state.shared, plan)
+    let status = {
+        let conn = conn!(state);
+        crate::focus::start(&conn, &state.shared, plan)?
+    };
+    crate::popup::open(&app);
+    if state.shared.notifications_enabled.load(Ordering::SeqCst) {
+        let what = if status.mode == "study" {
+            "Study session started"
+        } else {
+            "Focus session started"
+        };
+        let blocked = status
+            .preview
+            .as_ref()
+            .map(|p| {
+                format!(
+                    "{} until {}.",
+                    crate::popup::blocked_summary(p),
+                    &status.plan_ends_at[11..16]
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "Until {}. Nothing is blocked.",
+                    &status.plan_ends_at[11..16]
+                )
+            });
+        crate::limits::notify(
+            &app,
+            what,
+            &format!(
+                "{}: {blocked}",
+                status.subject.as_deref().unwrap_or(&status.label)
+            ),
+        );
+    }
+    Ok(status)
 }
 
 #[tauri::command]
-pub fn stop_focus(state: State<'_, AppState>, phrase: Option<String>) -> CmdResult<()> {
+pub fn show_main_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+#[tauri::command]
+pub fn stop_focus(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    phrase: Option<String>,
+) -> CmdResult<()> {
     let conn = conn!(state);
-    crate::focus::stop(&conn, &state.shared, phrase.as_deref())
+    crate::focus::stop(&conn, &state.shared, phrase.as_deref())?;
+    crate::popup::close(&app);
+    Ok(())
 }
 
 // ----------------------------------------------------------------- goals
