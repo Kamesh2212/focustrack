@@ -13,8 +13,8 @@ pub struct ForegroundApp {
 }
 
 pub use imp::{
-    close_windows, file_description, foreground_app, foreground_pid, idle_seconds,
-    is_session_locked, process_image, processes, terminate,
+    audible_exes, close_windows, controller_idle_seconds, file_description, foreground_app,
+    foreground_pid, idle_seconds, is_session_locked, process_image, processes, terminate,
 };
 
 /// Returns the last path component (`C:\a\b.exe` -> `b.exe`).
@@ -234,6 +234,105 @@ mod imp {
         }
     }
 
+    /// Lower-case exe names of processes currently playing sound (Windows audio
+    /// sessions on the default output device with a non-zero peak level).
+    /// Used so watching videos or playing games doesn't count as idle.
+    pub fn audible_exes() -> std::collections::HashSet<String> {
+        audio::audible_pids()
+            .into_iter()
+            .filter_map(|pid| unsafe { process_path(pid) })
+            .map(|p| file_name(&p).to_ascii_lowercase())
+            .collect()
+    }
+
+    mod audio {
+        use std::cell::Cell;
+        use windows::core::Interface;
+        use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+        use windows::Win32::Media::Audio::{
+            eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2,
+            IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        thread_local!(static COM_READY: Cell<bool> = const { Cell::new(false) });
+
+        /// Peak level above which a session counts as audible (silence is ~0).
+        const AUDIBLE: f32 = 0.001;
+
+        pub fn audible_pids() -> Vec<u32> {
+            COM_READY.with(|ready| {
+                if !ready.get() {
+                    // Fine if COM was already initialised on this thread.
+                    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                    ready.set(true);
+                }
+            });
+            unsafe { list() }.unwrap_or_default()
+        }
+
+        unsafe fn list() -> windows::core::Result<Vec<u32>> {
+            let devices: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+            let sessions = manager.GetSessionEnumerator()?;
+            let mut out = Vec::new();
+            for i in 0..sessions.GetCount()? {
+                let Ok(session) = sessions.GetSession(i) else {
+                    continue;
+                };
+
+                if session.GetState().ok() != Some(AudioSessionStateActive) {
+                    continue;
+                }
+                let peak = session
+                    .cast::<IAudioMeterInformation>()
+                    .and_then(|m| m.GetPeakValue())
+                    .unwrap_or(0.0);
+                if peak < AUDIBLE {
+                    continue;
+                }
+                if let Ok(pid) = session
+                    .cast::<IAudioSessionControl2>()
+                    .and_then(|c| c.GetProcessId())
+                {
+                    if pid != 0 {
+                        out.push(pid);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// Seconds since the last Xbox-compatible (XInput) controller input, or
+    /// `u64::MAX` if none has been seen. `GetLastInputInfo` ignores gamepads,
+    /// so without this, controller gaming would count as idle.
+    pub fn controller_idle_seconds() -> u64 {
+        use std::sync::Mutex;
+        use std::time::Instant;
+        use windows_sys::Win32::UI::Input::XboxController::{XInputGetState, XINPUT_STATE};
+        static LAST: Mutex<([u32; 4], Option<Instant>)> = Mutex::new(([0; 4], None));
+        let Ok(mut last) = LAST.lock() else {
+            return u64::MAX;
+        };
+        for (i, seen) in last.0.clone().iter().enumerate() {
+            let mut state: XINPUT_STATE = unsafe { std::mem::zeroed() };
+            // 0 = ERROR_SUCCESS (controller connected)
+            if unsafe { XInputGetState(i as u32, &mut state) } == 0 && state.dwPacketNumber != *seen
+            {
+                if *seen != 0 {
+                    last.1 = Some(Instant::now());
+                }
+                last.0[i] = state.dwPacketNumber;
+            }
+        }
+        last.1.map_or(u64::MAX, |t| t.elapsed().as_secs())
+    }
+
     /// Seconds since the last keyboard/mouse input anywhere in the session.
     pub fn idle_seconds() -> u64 {
         unsafe {
@@ -328,6 +427,12 @@ mod imp {
     pub fn is_session_locked() -> bool {
         false
     }
+    pub fn audible_exes() -> std::collections::HashSet<String> {
+        Default::default()
+    }
+    pub fn controller_idle_seconds() -> u64 {
+        u64::MAX
+    }
     pub fn file_description(_path: &str) -> Option<String> {
         None
     }
@@ -357,6 +462,15 @@ mod tests {
         assert_eq!(file_name(r"C:\Program Files\App\app.exe"), "app.exe");
         assert_eq!(file_name("/usr/bin/app"), "app");
         assert_eq!(file_name("app.exe"), "app.exe");
+    }
+
+    /// Manual check on a real PC: `cargo test audible -- --ignored --nocapture`
+    /// while something is playing sound.
+    #[test]
+    #[ignore]
+    fn audible_apps_now() {
+        println!("audible: {:?}", audible_exes());
+        println!("controller idle: {}", controller_idle_seconds());
     }
 
     #[test]
