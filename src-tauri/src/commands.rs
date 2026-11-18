@@ -495,7 +495,7 @@ pub fn apply_paused(app: &AppHandle, paused: bool) -> CmdResult<()> {
         let _ = item.0.set_text(if paused {
             "Resume tracking"
         } else {
-            "Pause tracking"
+            "Pause tracking (limits still apply)"
         });
     }
     Ok(())

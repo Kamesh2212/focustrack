@@ -28,7 +28,13 @@ function LiveBanner({ live }: { live: LiveStatus }) {
     },
     idle: { icon: Moon, tone: "bg-amber-500", text: "Idle — no keyboard or mouse input" },
     locked: { icon: Lock, tone: "bg-slate-400", text: "Computer locked" },
-    paused: { icon: Pause, tone: "bg-slate-400", text: "Tracking paused" },
+    paused: {
+      icon: Pause,
+      tone: "bg-slate-400",
+      text: live.appName
+        ? `Tracking paused · still counting ${live.domain ?? live.appName} (it has a limit)`
+        : "Tracking paused · apps and sites with limits still count",
+    },
     starting: { icon: Activity, tone: "bg-slate-400", text: "Starting tracker…" },
   }[live.state];
   const Icon = view.icon;

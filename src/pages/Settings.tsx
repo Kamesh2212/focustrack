@@ -61,7 +61,7 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card title="Tracking">
-          <Row title="Track my computer usage" desc="When paused, nothing is recorded until you resume. Also available from the tray icon.">
+          <Row title="Track my computer usage" desc="When paused, nothing is recorded except apps and websites that have a usage limit — those keep counting and stay blocked when the limit is reached. Also available from the tray icon.">
             <Toggle label="Tracking enabled" checked={!s.paused} onChange={(on) => run(() => api.setPaused(!on))} />
           </Row>
           <Row
