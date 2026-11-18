@@ -325,6 +325,14 @@ fn check(
     let day = analytics::fmt_day(now.date());
     let limits = limit_status(conn, &day)?;
 
+    if let Ok(mut l) = shared.limited.lock() {
+        *l = limits
+            .iter()
+            .filter(|l| l.enabled && !l.key.is_empty())
+            .map(|l| l.key.to_ascii_lowercase())
+            .collect();
+    }
+
     // Blocking applies even when notifications are off.
     let enforced = enforcement_times(&limits, first_reached, now);
     if let Ok(mut b) = shared.blocklist.lock() {
@@ -344,11 +352,19 @@ fn check(
             .collect();
     }
 
-    if !shared.notifications_enabled.load(Ordering::SeqCst) || shared.paused.load(Ordering::SeqCst)
-    {
+    if !shared.notifications_enabled.load(Ordering::SeqCst) {
         return Ok(());
     }
     let mut notices = limit_notices(&limits);
+    // Paused: limits still apply (and notify); other reminders wait.
+    if shared.paused.load(Ordering::SeqCst) {
+        for n in notices {
+            if db::mark_notified(conn, &n.key, &day)? {
+                notify(app, &n.title, &n.body);
+            }
+        }
+        return Ok(());
+    }
     let goals = crate::goals::goal_status(conn, &day)?;
     for g in &goals {
         if let Some((key, title, body)) = crate::goals::goal_notice(g) {

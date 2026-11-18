@@ -59,6 +59,10 @@ pub struct Shared {
     pub status: Mutex<LiveStatus>,
     /// Latest report from each browser's extension, keyed by browser family.
     pub browsers: Mutex<HashMap<String, BrowserReport>>,
+    /// Lower-case exe names and domains that have an enabled usage limit.
+    /// These keep counting while tracking is paused (so pausing can't be
+    /// used to get around a limit).
+    pub limited: Mutex<HashSet<String>>,
     /// Domains the extensions should block (limit reached, blocking on).
     pub blocklist: Mutex<Vec<String>>,
     /// Distracting domains blocked while a focus round is running.
@@ -87,6 +91,7 @@ impl Shared {
                 ..Default::default()
             }),
             browsers: Mutex::new(HashMap::new()),
+            limited: Mutex::new(HashSet::new()),
             blocklist: Mutex::new(Vec::new()),
             focus_blocklist: Mutex::new(Vec::new()),
             focus_allow_sites: Mutex::new(None),
@@ -246,15 +251,8 @@ impl<P: Probe> Tracker<P> {
         self.last_tick = now;
         self.split_at_midnight(now);
 
-        if self.shared.paused.load(Ordering::SeqCst) {
-            self.close_all(now);
-            self.set_status(LiveStatus {
-                state: "paused".into(),
-                ..Default::default()
-            });
-            return;
-        }
-
+        // While paused, only apps and websites with a usage limit are recorded.
+        let paused = self.shared.paused.load(Ordering::SeqCst);
         let fg = self.probe.foreground();
         let lock_screen = fg
             .as_ref()
@@ -273,7 +271,7 @@ impl<P: Probe> Tracker<P> {
         let threshold = self.shared.idle_threshold_secs.load(Ordering::SeqCst);
         let last_input = (now - Duration::seconds(idle_secs as i64)).max(midnight(now));
 
-        if idle_secs >= threshold {
+        if idle_secs >= threshold || (paused && fg.is_none()) {
             // Trim the app session back to the last input; that stretch is idle.
             if let Some(a) = self.active.take() {
                 let end = last_input.max(a.span.start);
@@ -282,6 +280,19 @@ impl<P: Probe> Tracker<P> {
             if let Some(w) = self.site.take() {
                 let end = last_input.max(w.span.start);
                 self.finish(SpanKind::Website, w.span, end);
+            }
+            if paused {
+                // Paused: idle time isn't recorded.
+                if let Some(span) = self.idle.take() {
+                    let end = last_input.max(span.start);
+                    self.finish(SpanKind::Idle, span, end);
+                }
+                self.set_status(LiveStatus {
+                    state: "paused".into(),
+                    ..Default::default()
+                });
+                self.maybe_flush();
+                return;
             }
             match self.idle.as_mut() {
                 Some(span) => span.last = now,
@@ -316,12 +327,17 @@ impl<P: Probe> Tracker<P> {
                 });
             }
             Some(app) => {
+                let record_app = !paused || self.is_limited_app(&app.exe_name);
                 let same = self
                     .active
                     .as_ref()
                     .map(|a| a.exe.eq_ignore_ascii_case(&app.exe_name))
                     .unwrap_or(false);
-                if same {
+                if !record_app {
+                    if let Some(a) = self.active.take() {
+                        self.finish(SpanKind::Usage, a.span, now);
+                    }
+                } else if same {
                     if let Some(a) = self.active.as_mut() {
                         a.span.last = now;
                     }
@@ -331,8 +347,26 @@ impl<P: Probe> Tracker<P> {
                     }
                     self.active = self.open_usage(&app, now);
                 }
-                let site = self.current_site(&app.exe_name, now);
+                let site = self
+                    .current_site(&app.exe_name, now)
+                    .filter(|(_, d)| !paused || self.is_limited_site(d));
                 self.update_site(site, now);
+                if paused {
+                    // Say what is still being counted, if anything.
+                    let counting = self
+                        .active
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .or_else(|| self.site.as_ref().map(|w| w.domain.clone()));
+                    self.set_status(LiveStatus {
+                        state: "paused".into(),
+                        app_name: counting,
+                        domain: self.site.as_ref().map(|w| w.domain.clone()),
+                        ..Default::default()
+                    });
+                    self.maybe_flush();
+                    return;
+                }
                 let status = match &self.active {
                     Some(a) => LiveStatus {
                         state: "active".into(),
@@ -352,6 +386,27 @@ impl<P: Probe> Tracker<P> {
             }
         }
         self.maybe_flush();
+    }
+
+    fn is_limited_app(&self, exe_name: &str) -> bool {
+        let exe = exe_name.to_ascii_lowercase();
+        self.shared
+            .limited
+            .lock()
+            .map(|l| l.contains(&exe))
+            .unwrap_or(false)
+    }
+
+    /// A limit on `youtube.com` also covers `m.youtube.com`.
+    fn is_limited_site(&self, domain: &str) -> bool {
+        self.shared
+            .limited
+            .lock()
+            .map(|l| {
+                l.iter()
+                    .any(|k| domain == k || domain.ends_with(&format!(".{k}")))
+            })
+            .unwrap_or(false)
     }
 
     /// Seconds without "activity": keyboard/mouse input, game-controller input,
@@ -775,6 +830,44 @@ mod tests {
 
         let total: i64 = usage(&t).iter().map(|r| r.2).sum();
         assert_eq!(total, 61 + 59);
+        assert_eq!(idle_total(&t), 0);
+    }
+
+    #[test]
+    fn pausing_doesnt_stop_limited_apps_and_sites_from_counting() {
+        // #4: pausing used to stop everything, so limits could never be reached.
+        let mut t = setup(at(18, 9, 0, 0));
+        t.shared
+            .limited
+            .lock()
+            .unwrap()
+            .extend(["steam.exe".to_string(), "youtube.com".to_string()]);
+        t.shared.paused.store(true, Ordering::SeqCst);
+
+        t.probe.app = Some("steam.exe"); // limited app: counts
+        run(&mut t, at(18, 9, 0, 0), at(18, 9, 10, 0));
+        assert_eq!(t.shared.status().state, "paused");
+        assert_eq!(t.shared.status().app_name.as_deref(), Some("Steam"));
+
+        t.probe.app = Some("code.exe"); // not limited: private while paused
+        run(&mut t, at(18, 9, 10, 1), at(18, 9, 20, 0));
+
+        t.probe.app = Some("chrome.exe"); // browser on a limited site (subdomain)
+        let mut cur = at(18, 9, 20, 1);
+        while cur <= at(18, 9, 30, 0) {
+            report(&t, "chrome", Some("m.youtube.com"), cur);
+            t.tick(cur);
+            cur += Duration::seconds(1);
+        }
+        t.close_all(at(18, 9, 30, 0));
+
+        let apps = usage(&t);
+        assert_eq!(apps.len(), 1, "only Steam is recorded as an app: {apps:?}");
+        assert_eq!((apps[0].0.as_str(), apps[0].2), ("steam.exe", 601));
+        assert_eq!(
+            sites(&t),
+            vec![("m.youtube.com".to_string(), "chrome".to_string(), 599)]
+        );
         assert_eq!(idle_total(&t), 0);
     }
 

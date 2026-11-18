@@ -65,7 +65,7 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
         if paused {
             "Resume tracking"
         } else {
-            "Pause tracking"
+            "Pause tracking (limits still apply)"
         },
         true,
         None::<&str>,
