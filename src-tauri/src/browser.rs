@@ -84,6 +84,14 @@ fn handle(mut req: Request, shared: &Shared) {
     let host_ok = header(&req, "Host").map_or(false, |h| {
         h == format!("127.0.0.1:{PORT}") || h == format!("localhost:{PORT}")
     });
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[browser] {} {} origin={:?} ok={}",
+        req.method(),
+        req.url(),
+        header(&req, "Origin").map(|o| o.split("://").next().unwrap_or("").to_string()),
+        origin_ok && host_ok
+    );
     if !origin_ok || !host_ok {
         let _ = req.respond(json_response(403, r#"{"error":"forbidden"}"#.into()));
         return;
