@@ -99,3 +99,15 @@ resource usage"*). The installer was not run on a clean machine.
 | Drag-to-reposition widgets (improvements §1) | Show/hide + up/down ordering |
 | Notes ↔ tasks association (improvements §6) | Notes link to sessions, not goals |
 | Cloud sync / cross-device (SRS 9 Phase 5) | Missing — see `docs/ROADMAP.md` |
+
+## 7. Resolved in 1.1.0
+
+| Finding | Fix |
+|---|---|
+| W1 videos counted as idle | Foreground app playing sound counts as activity (#1, PR #40) |
+| W2 controller gaming idle | XInput controller input counts as input (#3, PR #40) |
+| W3 pause bypassed limits | Limited apps/sites keep counting and stay blocked while paused (#4, PR #41) |
+| W4 exe-name identity | Path identity for generic names, launcher folder scope, renamed copies (#5, PR #42) |
+| W5 subdomains | Website limits include subdomains (#8, PR #42) |
+| Admin games couldn't be blocked (Genshin Impact) | Administrator mode (PR #42) |
+| Extension "app not running" in Firefox / sometimes Chrome, Brave | CORS + `null` origin handling, heartbeat status fixes (PR #39) |
