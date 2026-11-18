@@ -1,4 +1,4 @@
-import { WIDGETS, el, fetchSummary, loadLayout, saveLayout } from "./usage.js";
+import { WIDGETS, el, fetchSummary, hasHostAccess, loadLayout, requestHostAccess, saveLayout } from "./usage.js";
 
 const $ = (id) => document.getElementById(id);
 let layout = [];
@@ -56,12 +56,18 @@ async function refresh() {
   try {
     summary = await fetchSummary();
     $("offline").hidden = true;
-  } catch {
+  } catch (e) {
+    $("offline-detail").textContent = `Details: ${e.message}`;
+    $("grant").hidden = await hasHostAccess();
     summary = null;
     $("offline").hidden = false;
   }
   renderWidgets();
 }
+
+$("grant").addEventListener("click", async () => {
+  if (await requestHostAccess()) refresh();
+});
 
 $("customize").addEventListener("click", () => {
   const c = $("chooser");
