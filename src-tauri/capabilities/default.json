@@ -2,6 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for the main FocusTrack window",
-  "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "windows": ["main", "mini"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide"
+  ]
 }

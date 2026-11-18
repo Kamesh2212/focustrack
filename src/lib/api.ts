@@ -87,6 +87,7 @@ export const api = {
   openUrl: (url: string) => call<void>("open_url", { url }),
   studyTime: () => call<[number, number]>("get_study_time"),
   adminMode: () => call<AdminMode>("get_admin_mode"),
+  showMainWindow: () => call<void>("show_main_window"),
   enableAdminMode: () => call<void>("enable_admin_mode"),
   disableAdminMode: () => call<void>("disable_admin_mode"),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),

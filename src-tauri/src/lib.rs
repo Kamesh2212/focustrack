@@ -19,6 +19,7 @@ mod installed;
 mod limits;
 mod notes;
 mod platform;
+mod popup;
 mod profiles;
 mod tracker;
 
@@ -230,6 +231,7 @@ pub fn run() {
             commands::open_url,
             commands::get_study_time,
             commands::get_admin_mode,
+            commands::show_main_window,
             commands::enable_admin_mode,
             commands::disable_admin_mode,
         ])

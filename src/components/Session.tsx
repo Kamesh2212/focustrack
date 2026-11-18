@@ -5,6 +5,8 @@ import { useLoad, useNow } from "../lib/hooks";
 import { clock, fmtDuration } from "../lib/format";
 import type { BlockPreview, EndEarly, FocusPlan, FocusStatus, Profile } from "../lib/types";
 import { Button, Card, Empty, ErrorNote, Toggle, cx } from "./ui";
+import { startSessionMusic } from "./FocusMusic";
+import { music } from "../lib/music";
 
 export const ALL_CATEGORIES = ["Gaming", "Entertainment", "Social Media", "Communication", "Productivity", "Study", "Education", "Development", "Other"];
 
@@ -155,6 +157,8 @@ export function SessionStarter({
     try {
       const label = mode === "study" ? (plan.subject?.trim() || "Study") : plan.label;
       await api.startFocus({ ...plan, label, profileId: plan.profileId && plan.profileId > 0 ? plan.profileId : null });
+      // Started from a click, so the browser engine lets the music play.
+      startSessionMusic();
       onStarted();
     } catch (e) {
       setError(String(e));
@@ -319,6 +323,7 @@ export function ActiveSession({ f, stopPhrase, onChange }: { f: FocusStatus; sto
     setError(null);
     try {
       await api.stopFocus(phrase);
+      music.stop();
       onChange();
     } catch (e) {
       setError(String(e));

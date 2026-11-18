@@ -660,6 +660,9 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                 }
                 match tick(&conn, &shared, now(), ticks.is_multiple_of(15)) {
                     Ok(Some((title, body))) => {
+                        if status(&shared).is_none() {
+                            crate::popup::close(&app);
+                        }
                         if shared.notifications_enabled.load(Ordering::SeqCst) {
                             notify(&app, &title, &body);
                         }
