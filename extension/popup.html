@@ -12,19 +12,9 @@
       <span id="status" class="status"><span class="dot"></span><span id="status-text">Checking…</span></span>
     </header>
 
-    <section id="focus" class="focus-banner" hidden></section>
+    <div id="widgets"></div>
 
-    <div class="stats">
-      <div><span class="label">Screen time</span><span id="screen" class="big">—</span></div>
-      <div><span class="label">On the web</span><span id="web" class="big">—</span></div>
-    </div>
-
-    <h2>Top websites today</h2>
-    <div id="sites" class="list"></div>
-
-    <h2>Limits</h2>
-    <div id="limits" class="list"></div>
-
+    <button id="open-panel" class="btn wide" type="button">Open side panel</button>
     <p class="note">Current site: <span id="current">—</span>. Only domains are shared, and only with the FocusTrack app on this computer.</p>
     <script type="module" src="popup.js"></script>
   </body>

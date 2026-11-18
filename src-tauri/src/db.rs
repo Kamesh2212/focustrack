@@ -167,6 +167,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if version < 4 {
+        migrate_v4(conn)?;
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last saved.
     conn.execute(
         "UPDATE focus_sessions
@@ -174,6 +178,114 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          WHERE end_time IS NULL",
         [],
     )?;
+    Ok(())
+}
+
+/// Study category and mode, limit actions/overrides, custom goals, blocking
+/// profiles, notes and study resources.
+fn migrate_v4(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+         INSERT OR IGNORE INTO categories (name, color, kind) VALUES ('Study', '#14b8a6', 'productive');
+
+         ALTER TABLE usage_limits ADD COLUMN action TEXT NOT NULL DEFAULT 'notify';
+         UPDATE usage_limits SET action = CASE WHEN block = 1 THEN 'block' ELSE 'notify' END;
+         CREATE TABLE IF NOT EXISTS limit_overrides (
+             limit_id   INTEGER NOT NULL,
+             day        TEXT NOT NULL,
+             extra_secs INTEGER NOT NULL DEFAULT 0,
+             count      INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (limit_id, day)
+         );
+
+         CREATE TABLE goals_v4 (
+             id          INTEGER PRIMARY KEY,
+             kind        TEXT NOT NULL CHECK (kind IN ('max_screen', 'min_category', 'max_category', 'min_focus_sessions', 'custom')),
+             category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+             target      INTEGER NOT NULL DEFAULT 0,
+             title       TEXT,
+             enabled     INTEGER NOT NULL DEFAULT 1
+         );
+         INSERT INTO goals_v4 (id, kind, category_id, target, enabled)
+             SELECT id, kind, category_id, target, enabled FROM goals;
+         DROP TABLE goals;
+         ALTER TABLE goals_v4 RENAME TO goals;
+         CREATE TABLE IF NOT EXISTS goal_checks (
+             goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+             day     TEXT NOT NULL,
+             PRIMARY KEY (goal_id, day)
+         );
+
+         ALTER TABLE focus_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'focus';
+         ALTER TABLE focus_sessions ADD COLUMN subject TEXT;
+         ALTER TABLE focus_sessions ADD COLUMN goal_text TEXT;
+         ALTER TABLE focus_sessions ADD COLUMN goal_id INTEGER;
+         ALTER TABLE focus_sessions ADD COLUMN profile_id INTEGER;
+
+         CREATE TABLE IF NOT EXISTS block_profiles (
+             id                INTEGER PRIMARY KEY,
+             name              TEXT NOT NULL UNIQUE,
+             mode              TEXT NOT NULL CHECK (mode IN ('block', 'allow_only')),
+             categories        TEXT NOT NULL DEFAULT '[]',
+             apps              TEXT NOT NULL DEFAULT '[]',
+             sites             TEXT NOT NULL DEFAULT '[]',
+             unblock_on_breaks INTEGER NOT NULL DEFAULT 0,
+             end_early         TEXT NOT NULL DEFAULT 'confirm' CHECK (end_early IN ('allow', 'confirm', 'strict')),
+             builtin           INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT OR IGNORE INTO block_profiles (name, mode, categories, apps, sites, end_early, builtin) VALUES
+           ('Study Mode', 'block', '[\"Gaming\",\"Entertainment\",\"Social Media\"]', '[]', '[]', 'confirm', 1),
+           ('Work Mode', 'block', '[\"Gaming\",\"Entertainment\"]', '[]',
+              '[\"reddit.com\",\"instagram.com\",\"tiktok.com\",\"x.com\",\"twitter.com\",\"facebook.com\"]', 'allow', 1),
+           ('Deep Focus', 'allow_only', '[\"Study\",\"Education\",\"Development\",\"Productivity\"]', '[]',
+              '[\"google.com\",\"bing.com\",\"duckduckgo.com\",\"search.brave.com\",\"wikipedia.org\",\"stackoverflow.com\",\"github.com\"]', 'strict', 1),
+           ('Personal', 'block', '[]', '[]', '[]', 'confirm', 1);
+
+         CREATE TABLE IF NOT EXISTS notes (
+             id               INTEGER PRIMARY KEY,
+             notebook         TEXT NOT NULL DEFAULT 'General',
+             title            TEXT NOT NULL DEFAULT '',
+             body             TEXT NOT NULL DEFAULT '',
+             focus_session_id INTEGER,
+             created_at       TEXT NOT NULL,
+             updated_at       TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_notes_notebook ON notes(notebook, updated_at);
+
+         CREATE TABLE IF NOT EXISTS study_resources (
+             id      INTEGER PRIMARY KEY,
+             title   TEXT NOT NULL,
+             url     TEXT NOT NULL,
+             subject TEXT
+         );
+         INSERT INTO study_resources (title, url) VALUES
+           ('Google Scholar', 'https://scholar.google.com'),
+           ('Khan Academy', 'https://www.khanacademy.org'),
+           ('Coursera', 'https://www.coursera.org'),
+           ('Wikipedia', 'https://www.wikipedia.org'),
+           ('MDN Web Docs', 'https://developer.mozilla.org'),
+           ('arXiv', 'https://arxiv.org'),
+           ('Open Library', 'https://openlibrary.org');
+
+         PRAGMA user_version = 4;
+         COMMIT;",
+    )?;
+    // Move built-in study tools from Education to Study, unless the user changed them.
+    let study: i64 = conn.query_row("SELECT id FROM categories WHERE name = 'Study'", [], |r| r.get(0))?;
+    for exe in crate::categories::STUDY_EXES {
+        conn.execute(
+            "UPDATE applications SET category_id = ?1
+             WHERE exe_name = ?2 AND category_id = (SELECT id FROM categories WHERE name = 'Education')",
+            params![study, exe],
+        )?;
+    }
+    for domain in crate::categories::STUDY_DOMAINS {
+        conn.execute(
+            "UPDATE websites SET category_id = ?1
+             WHERE domain = ?2 AND category_id = (SELECT id FROM categories WHERE name = 'Education')",
+            params![study, domain],
+        )?;
+    }
     Ok(())
 }
 
@@ -188,6 +300,10 @@ pub struct StoredSettings {
     /// 0 = off
     pub break_reminder_mins: u64,
     pub website_tracking: bool,
+    /// How many times per day a blocked limit may be extended (0 = never).
+    pub overrides_per_day: i64,
+    /// "HH:MM" for the incomplete-goals reminder, or empty for off.
+    pub goal_reminder: String,
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -219,7 +335,11 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<StoredSettings> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let website_tracking = get_setting(conn, "website_tracking")?.as_deref() != Some("0");
+    let overrides_per_day = get_setting(conn, "overrides_per_day")?.and_then(|v| v.parse().ok()).unwrap_or(1);
+    let goal_reminder = get_setting(conn, "goal_reminder")?.unwrap_or_else(|| "20:00".into());
     Ok(StoredSettings {
+        overrides_per_day,
+        goal_reminder,
         paused,
         idle_threshold_secs,
         theme,
@@ -385,6 +505,8 @@ pub fn delete_all_usage(conn: &Connection) -> rusqlite::Result<()> {
          DELETE FROM website_sessions;
          DELETE FROM sent_notifications;
          DELETE FROM focus_sessions;
+         DELETE FROM limit_overrides;
+         DELETE FROM goal_checks;
          COMMIT;",
     )
 }
@@ -414,7 +536,9 @@ mod tests {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
         assert_eq!(n as usize, DEFAULT_CATEGORIES.len());
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
+        let profiles: i64 = conn.query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0)).unwrap();
+        assert_eq!(profiles, 4);
     }
 
     #[test]

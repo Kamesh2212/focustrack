@@ -1,6 +1,7 @@
 //! FocusTrack desktop app: tray-resident screen time tracker.
 
 mod analytics;
+mod blocker;
 mod browser;
 mod categories;
 mod commands;
@@ -10,7 +11,9 @@ mod goals;
 mod insights;
 mod installed;
 mod limits;
+mod notes;
 mod platform;
+mod profiles;
 mod tracker;
 
 use std::path::PathBuf;
@@ -102,6 +105,7 @@ pub fn run() {
         // A second launch just focuses the running instance (no double tracking).
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -120,6 +124,7 @@ pub fn run() {
             tracker::spawn(db_path.clone(), shared.clone());
             browser::spawn_server(shared.clone(), db_path.clone());
             focus::spawn(app.handle().clone(), db_path.clone(), shared.clone());
+            blocker::spawn(app.handle().clone(), shared.clone());
             limits::spawn(app.handle().clone(), db_path, shared.clone());
 
             app.manage(AppState { db: Mutex::new(conn), shared, data_dir });
@@ -174,6 +179,26 @@ pub fn run() {
             commands::set_goal,
             commands::delete_goal,
             commands::get_insights,
+            commands::set_overrides_per_day,
+            commands::set_goal_reminder,
+            commands::set_dashboard_layout,
+            commands::override_limit,
+            commands::preview_profile,
+            commands::request_stop_focus,
+            commands::get_profiles,
+            commands::save_profile,
+            commands::delete_profile,
+            commands::toggle_goal,
+            commands::get_notebooks,
+            commands::get_notes,
+            commands::create_note,
+            commands::update_note,
+            commands::delete_note,
+            commands::get_resources,
+            commands::add_resource,
+            commands::delete_resource,
+            commands::open_url,
+            commands::get_study_time,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

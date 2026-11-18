@@ -1,23 +1,30 @@
-//! Usage limits, break reminders and desktop notifications (SRS 2.5, 2.6, 2.9).
+//! Usage limits, break reminders, goal reminders and desktop notifications
+//! (SRS 2.5, 2.6, 2.9; improvements doc §2, §3).
 //!
-//! Every 15 s: compute today's usage for each enabled limit, send a Windows
-//! notification when it crosses the warning threshold or the limit (once per
-//! limit per day, remembered in `sent_notifications`), and refresh the list of
-//! domains the browser extensions should block.
+//! Every 15 s: compute today's usage for each enabled limit and apply its action:
+//!   * `notify`          — notifications at the warning level and at the limit
+//!   * `block`           — block as soon as the limit is reached
+//!   * `warn_then_block` — warning notification, then a 1-minute heads-up, then block
+//! Apps are blocked by `blocker.rs`, websites by the browser extension. A limit
+//! can be extended by 15 minutes a few times a day (configurable).
 
 use crate::analytics;
+use crate::blocker;
 use crate::db;
 use crate::tracker::Shared;
-use chrono::{Local, NaiveDateTime, Timelike};
+use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-const CHECK_EVERY: Duration = Duration::from_secs(15);
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+pub const GRACE_SECS: i64 = 60;
+pub const OVERRIDE_SECS: i64 = 15 * 60;
+pub const ACTIONS: &[&str] = &["notify", "block", "warn_then_block"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,20 +34,32 @@ pub struct LimitStatus {
     pub target_type: String,
     pub target_id: i64,
     pub name: String,
+    /// Exe name (apps) or domain (websites).
+    pub key: String,
     pub color: String,
     pub daily_limit_secs: i64,
     pub warn_pct: i64,
-    pub block: bool,
+    /// `notify` | `block` | `warn_then_block`
+    pub action: String,
     pub enabled: bool,
     pub used_secs: i64,
+    /// Extra time granted by overrides today.
+    pub extra_secs: i64,
+    pub overrides_used: i64,
 }
 
 impl LimitStatus {
+    pub fn allowed_secs(&self) -> i64 {
+        self.daily_limit_secs + self.extra_secs
+    }
     pub fn exceeded(&self) -> bool {
-        self.used_secs >= self.daily_limit_secs
+        self.used_secs >= self.allowed_secs()
     }
     pub fn warned(&self) -> bool {
-        self.used_secs * 100 >= self.daily_limit_secs * self.warn_pct
+        self.used_secs * 100 >= self.allowed_secs() * self.warn_pct
+    }
+    pub fn blocks(&self) -> bool {
+        self.action != "notify"
     }
 }
 
@@ -49,19 +68,22 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
     let mut stmt = conn.prepare(
         "SELECT l.id, l.target_type, l.target_id,
                 COALESCE(a.display_name, w.domain, '(removed)'),
+                COALESCE(a.exe_name, w.domain, ''),
                 COALESCE(ca.color, cw.color, '#94a3b8'),
-                l.daily_limit_secs, l.warn_pct, l.block, l.enabled,
+                l.daily_limit_secs, l.warn_pct, l.action, l.enabled,
                 CASE l.target_type
                   WHEN 'app' THEN (SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions
                                    WHERE app_id = l.target_id AND day = ?1)
                   ELSE (SELECT COALESCE(SUM(duration_secs), 0) FROM website_sessions
                         WHERE website_id = l.target_id AND day = ?1)
-                END
+                END,
+                COALESCE(o.extra_secs, 0), COALESCE(o.count, 0)
          FROM usage_limits l
          LEFT JOIN applications a ON l.target_type = 'app' AND a.id = l.target_id
          LEFT JOIN categories ca ON ca.id = a.category_id
          LEFT JOIN websites w ON l.target_type = 'website' AND w.id = l.target_id
          LEFT JOIN categories cw ON cw.id = w.category_id
+         LEFT JOIN limit_overrides o ON o.limit_id = l.id AND o.day = ?1
          ORDER BY l.id",
     )?;
     let rows = stmt.query_map(params![day], |r| {
@@ -70,25 +92,71 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
             target_type: r.get(1)?,
             target_id: r.get(2)?,
             name: r.get(3)?,
-            color: r.get(4)?,
-            daily_limit_secs: r.get(5)?,
-            warn_pct: r.get(6)?,
-            block: r.get::<_, i64>(7)? != 0,
-            enabled: r.get::<_, i64>(8)? != 0,
-            used_secs: r.get(9)?,
+            key: r.get(4)?,
+            color: r.get(5)?,
+            daily_limit_secs: r.get(6)?,
+            warn_pct: r.get(7)?,
+            action: r.get(8)?,
+            enabled: r.get::<_, i64>(9)? != 0,
+            used_secs: r.get(10)?,
+            extra_secs: r.get(11)?,
+            overrides_used: r.get(12)?,
         })
     })?;
     let out = rows.collect();
     out
 }
 
-/// Domains to block right now: enabled website limits with blocking that are used up.
-pub fn blocked_domains(limits: &[LimitStatus]) -> Vec<String> {
-    limits
-        .iter()
-        .filter(|l| l.target_type == "website" && l.enabled && l.block && l.exceeded())
-        .map(|l| l.name.clone())
-        .collect()
+/// Extends a limit by 15 minutes for today, if overrides remain.
+pub fn override_limit(conn: &Connection, id: i64, day: &str, per_day: i64) -> Result<(), String> {
+    let used: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(count), 0) FROM limit_overrides WHERE day = ?1",
+            params![day],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if used >= per_day {
+        return Err(if per_day == 0 {
+            "Extending limits is turned off in Settings".into()
+        } else {
+            format!("You've used all {per_day} extension{} for today", if per_day == 1 { "" } else { "s" })
+        });
+    }
+    conn.execute(
+        "INSERT INTO limit_overrides (limit_id, day, extra_secs, count) VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(limit_id, day) DO UPDATE SET extra_secs = extra_secs + ?3, count = count + 1",
+        params![id, day, OVERRIDE_SECS],
+    )
+    .map_err(|e| e.to_string())?;
+    // Allow the "reached" notification and grace period to happen again.
+    conn.execute(
+        "DELETE FROM sent_notifications WHERE key LIKE ?1 AND day = ?2",
+        params![format!("limit:{id}:%"), day],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// When each blocking limit starts being enforced: immediately for `block`,
+/// after a one-minute heads-up for `warn_then_block`.
+pub fn enforcement_times(
+    limits: &[LimitStatus],
+    first_reached: &mut HashMap<(i64, i64), NaiveDateTime>,
+    now: NaiveDateTime,
+) -> Vec<(LimitStatus, NaiveDateTime)> {
+    let mut out = Vec::new();
+    for l in limits.iter().filter(|l| l.enabled && l.blocks()) {
+        let key = (l.id, l.extra_secs);
+        if !l.exceeded() {
+            first_reached.remove(&key);
+            continue;
+        }
+        let reached = *first_reached.entry(key).or_insert(now);
+        let from = if l.action == "warn_then_block" { reached + Duration::seconds(GRACE_SECS) } else { reached };
+        out.push((l.clone(), from));
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,29 +175,36 @@ fn fmt(secs: i64) -> String {
     }
 }
 
-/// The notification each limit currently calls for (exceeded wins over warn).
+/// The notification each limit currently calls for.
 pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
     let mut out = Vec::new();
     for l in limits.iter().filter(|l| l.enabled && l.daily_limit_secs > 0) {
+        let kind = if l.target_type == "app" { "app" } else { "site" };
         if l.exceeded() {
-            out.push(Notice {
-                key: format!("limit:{}:exceeded", l.id),
-                title: format!("Daily limit reached: {}", l.name),
-                body: if l.block && l.target_type == "website" {
-                    format!("You've used your {} for {} today. It's now blocked until tomorrow.", fmt(l.daily_limit_secs), l.name)
-                } else {
-                    format!("You've used your {} limit for {} today.", fmt(l.daily_limit_secs), l.name)
-                },
-            });
-        } else if l.warned() {
+            let (title, body) = match l.action.as_str() {
+                "notify" => (
+                    format!("Daily limit reached: {}", l.name),
+                    format!("You've used your {} limit for {} today.", fmt(l.allowed_secs()), l.name),
+                ),
+                "warn_then_block" => (
+                    format!("{} closes in 1 minute", l.name),
+                    format!("You've reached your {} limit. Save your work — the {kind} will be blocked until tomorrow.", fmt(l.allowed_secs())),
+                ),
+                _ => (
+                    format!("{} is blocked for today", l.name),
+                    format!("You've reached your {} limit for {}.", fmt(l.allowed_secs()), l.name),
+                ),
+            };
+            out.push(Notice { key: format!("limit:{}:exceeded", l.id), title, body });
+        } else if l.warned() && l.action != "block" {
             out.push(Notice {
                 key: format!("limit:{}:warn", l.id),
                 title: format!("{}% of your {} limit", l.warn_pct, l.name),
                 body: format!(
                     "{} used of {} today — {} left.",
                     fmt(l.used_secs),
-                    fmt(l.daily_limit_secs),
-                    fmt(l.daily_limit_secs - l.used_secs)
+                    fmt(l.allowed_secs()),
+                    fmt(l.allowed_secs() - l.used_secs)
                 ),
             });
         }
@@ -138,15 +213,10 @@ pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
 }
 
 /// "You've been using your computer for 2h" once per continuous session.
-pub fn break_notice(
-    spans: &[(NaiveDateTime, NaiveDateTime)],
-    now: NaiveDateTime,
-    reminder_mins: u64,
-) -> Option<Notice> {
+pub fn break_notice(spans: &[(NaiveDateTime, NaiveDateTime)], now: NaiveDateTime, reminder_mins: u64) -> Option<Notice> {
     if reminder_mins == 0 || spans.is_empty() {
         return None;
     }
-    // Walk back from the latest span while gaps are short.
     let mut start = spans.last()?.0;
     let end = spans.iter().map(|s| s.1).max()?;
     for w in spans.windows(2).rev() {
@@ -167,6 +237,29 @@ pub fn break_notice(
     })
 }
 
+/// Evening reminder listing goals that aren't done yet.
+pub fn goal_reminder(goals: &[crate::goals::GoalStatus], now: NaiveDateTime, at: &str) -> Option<Notice> {
+    let time = NaiveTime::parse_from_str(at, "%H:%M").ok()?;
+    if now.time() < time {
+        return None;
+    }
+    let pending: Vec<&str> = goals
+        .iter()
+        .filter(|g| g.enabled && g.state == "in_progress")
+        .map(|g| g.label.as_str())
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    let shown = pending.iter().take(3).copied().collect::<Vec<_>>().join(" · ");
+    let more = if pending.len() > 3 { format!(" and {} more", pending.len() - 3) } else { String::new() };
+    Some(Notice {
+        key: "goals:reminder".into(),
+        title: format!("{} goal{} left today", pending.len(), if pending.len() == 1 { "" } else { "s" }),
+        body: format!("{shown}{more}"),
+    })
+}
+
 fn now() -> NaiveDateTime {
     let t = Local::now().naive_local();
     t.with_nanosecond(0).unwrap_or(t)
@@ -179,24 +272,45 @@ pub fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
     }
 }
 
-fn check(conn: &Connection, app: &tauri::AppHandle, shared: &Shared) -> rusqlite::Result<()> {
+fn check(
+    conn: &Connection,
+    app: &tauri::AppHandle,
+    shared: &Shared,
+    first_reached: &mut HashMap<(i64, i64), NaiveDateTime>,
+) -> rusqlite::Result<()> {
     let now = now();
     let day = analytics::fmt_day(now.date());
     let limits = limit_status(conn, &day)?;
 
+    // Blocking applies even when notifications are off.
+    let enforced = enforcement_times(&limits, first_reached, now);
     if let Ok(mut b) = shared.blocklist.lock() {
-        *b = blocked_domains(&limits);
+        *b = enforced
+            .iter()
+            .filter(|(l, from)| l.target_type == "website" && now >= *from)
+            .map(|(l, _)| l.key.clone())
+            .collect();
+    }
+    if let Ok(mut b) = shared.app_blocks.lock() {
+        b.limit = enforced
+            .iter()
+            .filter(|(l, _)| l.target_type == "app" && !blocker::is_protected_name(&l.key.to_ascii_lowercase()))
+            .map(|(l, from)| (l.key.to_ascii_lowercase(), (l.name.clone(), *from)))
+            .collect();
     }
 
     if !shared.notifications_enabled.load(Ordering::SeqCst) || shared.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
     let mut notices = limit_notices(&limits);
-    for g in crate::goals::goal_status(conn, &day)? {
-        if let Some((key, title, body)) = crate::goals::goal_notice(&g) {
+    let goals = crate::goals::goal_status(conn, &day)?;
+    for g in &goals {
+        if let Some((key, title, body)) = crate::goals::goal_notice(g) {
             notices.push(Notice { key, title, body });
         }
     }
+    let settings = db::load_settings(conn)?;
+    notices.extend(goal_reminder(&goals, now, &settings.goal_reminder));
     let spans = analytics::active_spans(conn, &day, &day)?;
     notices.extend(break_notice(&spans, now, shared.break_reminder_mins.load(Ordering::SeqCst)));
     for n in notices {
@@ -218,11 +332,17 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                     return;
                 }
             };
+            let mut first_reached = HashMap::new();
+            let mut day = now().date();
             loop {
                 if shared.shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                if let Err(e) = check(&conn, &app, &shared) {
+                if now().date() != day {
+                    day = now().date();
+                    first_reached.clear();
+                }
+                if let Err(e) = check(&conn, &app, &shared, &mut first_reached) {
                     eprintln!("[limits] check failed: {e}");
                 }
                 thread::sleep(CHECK_EVERY);
@@ -240,41 +360,63 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap()
     }
 
-    fn limit(kind: &str, used: i64, limit: i64, block: bool) -> LimitStatus {
+    fn limit(kind: &str, used: i64, limit: i64, action: &str) -> LimitStatus {
         LimitStatus {
             id: 7,
             target_type: kind.into(),
             target_id: 1,
             name: "youtube.com".into(),
+            key: "youtube.com".into(),
             color: String::new(),
             daily_limit_secs: limit,
             warn_pct: 80,
-            block,
+            action: action.into(),
             enabled: true,
             used_secs: used,
+            extra_secs: 0,
+            overrides_used: 0,
         }
     }
 
     #[test]
-    fn warn_then_exceeded() {
-        assert!(limit_notices(&[limit("website", 2000, 3600, false)]).is_empty());
-        let warn = limit_notices(&[limit("website", 2900, 3600, false)]);
+    fn notices_follow_the_action() {
+        assert!(limit_notices(&[limit("website", 2000, 3600, "notify")]).is_empty());
+        let warn = limit_notices(&[limit("website", 2900, 3600, "notify")]);
         assert_eq!(warn[0].key, "limit:7:warn");
         assert!(warn[0].body.contains("48m used of 1h"), "{}", warn[0].body);
-        let over = limit_notices(&[limit("website", 3600, 3600, true)]);
-        assert_eq!(over[0].key, "limit:7:exceeded");
-        assert!(over[0].body.contains("blocked"));
+        assert!(limit_notices(&[limit("website", 2900, 3600, "block")]).is_empty(), "block: no early warning");
+        assert_eq!(limit_notices(&[limit("app", 2900, 3600, "warn_then_block")])[0].key, "limit:7:warn");
+        let over = limit_notices(&[limit("app", 3600, 3600, "warn_then_block")]);
+        assert!(over[0].title.contains("closes in 1 minute"));
+        assert!(limit_notices(&[limit("app", 3600, 3600, "block")])[0].title.contains("blocked"));
     }
 
     #[test]
-    fn only_exceeded_blocking_websites_are_blocked() {
-        let ls = [
-            limit("website", 3700, 3600, true),
-            limit("website", 3700, 3600, false),
-            limit("website", 100, 3600, true),
-            limit("app", 3700, 3600, true),
-        ];
-        assert_eq!(blocked_domains(&ls), vec!["youtube.com".to_string()]);
+    fn enforcement_waits_for_grace_and_respects_overrides() {
+        let mut first = HashMap::new();
+        let ls = [limit("app", 3700, 3600, "warn_then_block"), limit("app", 3700, 3600, "notify")];
+        let e = enforcement_times(&ls, &mut first, at(10, 0));
+        assert_eq!(e.len(), 1, "notify-only limits never block");
+        assert_eq!(e[0].1, at(10, 1));
+        // Next check keeps the original reach time.
+        assert_eq!(enforcement_times(&ls, &mut first, at(10, 0) + Duration::seconds(15))[0].1, at(10, 1));
+        // An override (+15 min) un-blocks until the new allowance is used.
+        let extended = LimitStatus { extra_secs: 900, ..ls[0].clone() };
+        assert!(enforcement_times(&[extended], &mut first, at(10, 2)).is_empty());
+        assert_eq!(enforcement_times(&[limit("app", 3600, 3600, "block")], &mut HashMap::new(), at(11, 0))[0].1, at(11, 0));
+    }
+
+    #[test]
+    fn overrides_are_capped_per_day() {
+        let conn = db::open_in_memory().unwrap();
+        override_limit(&conn, 1, "2026-11-18", 2).unwrap();
+        override_limit(&conn, 2, "2026-11-18", 2).unwrap();
+        assert!(override_limit(&conn, 1, "2026-11-18", 2).unwrap_err().contains("all 2"));
+        assert!(override_limit(&conn, 1, "2026-11-18", 0).unwrap_err().contains("turned off"));
+        let extra: i64 = conn
+            .query_row("SELECT extra_secs FROM limit_overrides WHERE limit_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(extra, 900);
     }
 
     #[test]
@@ -282,28 +424,53 @@ mod tests {
         let spans = [(at(9, 0), at(10, 0)), (at(10, 2), at(11, 5))];
         let n = break_notice(&spans, at(11, 5), 120).expect("2h05m continuous");
         assert_eq!(n.key, "break:2026-11-18 09:00:00");
-        assert!(break_notice(&spans, at(11, 5), 180).is_none(), "below threshold");
-        assert!(break_notice(&spans, at(12, 0), 120).is_none(), "user already left");
+        assert!(break_notice(&spans, at(11, 5), 180).is_none());
+        assert!(break_notice(&spans, at(12, 0), 120).is_none());
         let with_gap = [(at(9, 0), at(10, 0)), (at(10, 30), at(11, 5))];
-        assert!(break_notice(&with_gap, at(11, 5), 60).is_none(), "30m break resets it");
-        assert!(break_notice(&spans, at(11, 5), 0).is_none(), "disabled");
+        assert!(break_notice(&with_gap, at(11, 5), 60).is_none());
+        assert!(break_notice(&spans, at(11, 5), 0).is_none());
     }
 
     #[test]
-    fn status_query_sums_today() {
+    fn status_query_sums_today_with_overrides() {
         let conn = db::open_in_memory().unwrap();
         let (app, _) = db::get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), at(9, 0)).unwrap();
         let id = db::insert_usage(&conn, app, at(9, 0)).unwrap();
         db::update_span(&conn, db::SpanKind::Usage, id, at(9, 0), at(9, 30)).unwrap();
-        let site = db::get_or_create_website(&conn, "youtube.com", at(9, 0)).unwrap();
-        let w = db::insert_website_session(&conn, site, "chrome", at(10, 0)).unwrap();
-        db::update_span(&conn, db::SpanKind::Website, w, at(10, 0), at(10, 50)).unwrap();
-        conn.execute("INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, block) VALUES ('app', ?1, 3600, 0)", params![app]).unwrap();
-        conn.execute("INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, block) VALUES ('website', ?1, 2700, 1)", params![site]).unwrap();
-
+        conn.execute(
+            "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action) VALUES ('app', ?1, 1800, 'block')",
+            params![app],
+        )
+        .unwrap();
         let ls = limit_status(&conn, "2026-11-18").unwrap();
-        assert_eq!((ls[0].name.as_str(), ls[0].used_secs), ("Steam", 1800));
-        assert_eq!((ls[1].name.as_str(), ls[1].used_secs), ("youtube.com", 3000));
-        assert_eq!(blocked_domains(&ls), vec!["youtube.com".to_string()]);
+        assert_eq!((ls[0].name.as_str(), ls[0].key.as_str(), ls[0].used_secs), ("Steam", "steam.exe", 1800));
+        assert!(ls[0].exceeded());
+        override_limit(&conn, ls[0].id, "2026-11-18", 1).unwrap();
+        let ls = limit_status(&conn, "2026-11-18").unwrap();
+        assert_eq!((ls[0].extra_secs, ls[0].overrides_used), (900, 1));
+        assert!(!ls[0].exceeded());
+    }
+
+    #[test]
+    fn goal_reminder_lists_pending_goals_after_set_time() {
+        let g = |label: &str, state: &str| crate::goals::GoalStatus {
+            id: 1,
+            kind: "custom".into(),
+            category_id: None,
+            category: None,
+            color: String::new(),
+            target: 0,
+            title: Some(label.into()),
+            enabled: true,
+            current: 0,
+            state: state.into(),
+            label: label.into(),
+        };
+        let goals = [g("Read 20 pages", "in_progress"), g("Exercise", "achieved")];
+        assert!(goal_reminder(&goals, at(19, 0), "20:00").is_none());
+        let n = goal_reminder(&goals, at(20, 5), "20:00").unwrap();
+        assert_eq!(n.title, "1 goal left today");
+        assert_eq!(n.body, "Read 20 pages");
+        assert!(goal_reminder(&goals, at(21, 0), "").is_none(), "off");
     }
 }

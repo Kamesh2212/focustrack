@@ -15,7 +15,8 @@ screenshots, passwords, full URLs or page content.
 | 2 · Dashboard & analytics | Dashboard, app breakdown & categories, daily/weekly reports, charts, heatmap, history, CSV export, settings | **Implemented** |
 | 3 · Advanced tracking | Browser extension, website tracking & categories, app/website daily limits, website blocking, Windows notifications, break reminders | **Implemented** |
 | 4 · Productivity | Focus Mode (Pomodoro, presets, custom, distraction blocking, history, streaks), daily goals, productivity reports, activity heatmap, usage insights | **Implemented** |
-| 5 · Advanced | AI insights, streaks, sync | Planned |
+| 4.5 · Improvements | Side-panel widgets (your own new tab is kept), real app blocking, limit actions & overrides, custom goals and to-dos on the dashboard, customizable dashboard, Study category & Study page, blocking profiles, notes, study resources | **Implemented** |
+| 5 · Advanced | AI insights, achievements, sync | Planned |
 
 ## How tracking works
 
@@ -46,9 +47,12 @@ The local API (`src-tauri/src/browser.rs`) listens on 127.0.0.1 only and rejects
 - Firefox: `about:debugging` → This Firefox → **Load Temporary Add-on** → `extension/manifest.json`
   (temporary until Firefox restarts; a signed build is needed for permanent install).
 
-**What the extension shows:** its toolbar popup lists today's screen time, web time, top sites and limits, and
-the **new-tab page** is replaced with a FocusTrack dashboard (clock, search with your default engine, top sites,
-limits, goals and any running focus session). Both read `GET /v1/summary` from the desktop app.
+**What the extension shows:** your browser's own new-tab page is left untouched (browsers don't let extensions
+add to the built-in new tab). Instead, FocusTrack widgets live in the browser's **side panel**, which can stay open
+beside any page, including your new tab. Choose and reorder widgets with **Customize**: screen time, goals & to-dos
+(tick them off there), focus session, website usage, app usage, productivity summary, limits and a quick note.
+The toolbar popup shows your first two widgets and opens the side panel. Data comes from `GET /v1/summary`;
+`POST /v1/goals/toggle` and `POST /v1/notes` handle ticks and quick notes (extension-only, like the rest of the API).
 
 ## Focus Mode, goals and insights
 
@@ -62,6 +66,30 @@ limits, goals and any running focus session). Both read `GET /v1/summary` from t
 - **Insights** (`insights.rs`): plain-language observations computed locally, such as the biggest
   week-over-week changes, your busiest hours, distracting time, monthly productive trend and focus streak.
 - **Reports** add a daily productive / neutral / distracting chart.
+
+## Blocking
+
+- **App blocking** (`blocker.rs`): every 2 s, running processes are checked against apps whose limit is used up and
+  apps blocked by the current session's profile. A blocked app is first asked to close (so it can offer to save),
+  then terminated if still open after 8 s, and closed again if reopened. Windows components, anything under
+  `C:\Windows`, File Explorer, Task Manager, terminals and FocusTrack itself are never touched.
+- **Limit actions**: *Notify only*, *Warn, then block* (1-minute heads-up), or *Block at the limit*, for apps and
+  websites. A blocked limit can be extended by 15 minutes a configurable number of times per day (0 = strict).
+- **Blocking profiles** (`profiles.rs`): Study Mode, Work Mode, Deep Focus (allow-only) and Personal are built in;
+  create your own. A profile blocks (or, in allow-only mode, allows) categories plus specific apps and websites.
+  The Focus and Study pages show exactly which apps and websites will be blocked before you start. Blocking lasts
+  the whole session, breaks included unless the profile opens them, and lifts automatically at the end.
+- **Ending early**: per profile — allowed, type a confirmation phrase, or strict (request, wait 1 minute, confirm).
+
+## Study, notes and goals
+
+- **Study** category (productive) and a **Study** page: study timer with subject and goal, Study Mode blocking,
+  study time stats, saved study resources, and notes for the current subject.
+- **Notes** page: notebooks, search, autosave; notes written during a session are linked to it. Quick notes from
+  the dashboard and the browser side panel.
+- **Goals** on the dashboard: measured goals (screen time, category time, focus sessions) and custom to-dos you tick
+  off each day, with an evening reminder for anything still open.
+- The **dashboard** is customizable: show, hide and reorder its sections.
 
 ## Limits and notifications
 
@@ -86,6 +114,9 @@ src-tauri/src/
   goals.rs               Daily goals and progress
   insights.rs            Rule-based usage insights
   installed.rs           Installed-app discovery (Start Menu .lnk parser + registry)
+  blocker.rs             App blocking (graceful close, then terminate; protected list)
+  profiles.rs            Blocking profiles and what they resolve to
+  notes.rs               Notes and study resources
   platform.rs            Win32 calls (windows-sys)
   db.rs                  SQLite schema, migrations, writes
   analytics.rs           Aggregations: totals, per-day, per-app, hourly, heatmap, sessions

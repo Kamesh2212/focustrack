@@ -47,9 +47,20 @@ struct HeartbeatReply<'a> {
     tracking: bool,
     /// Blocked because a daily limit was reached.
     blocked: &'a [String],
-    /// Blocked because a focus round is running.
+    /// Blocked because a focus session is running.
     focus_blocked: &'a [String],
+    /// "Allow only" sessions: every other site is blocked.
+    focus_allow_only: Option<&'a [String]>,
     focus_ends_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppRow {
+    name: String,
+    category: String,
+    color: String,
+    secs: i64,
 }
 
 #[derive(Serialize)]
@@ -69,6 +80,10 @@ struct Summary {
     active_secs: i64,
     web_secs: i64,
     top_sites: Vec<SiteRow>,
+    top_apps: Vec<AppRow>,
+    productive_secs: i64,
+    neutral_secs: i64,
+    distracting_secs: i64,
     limits: Vec<crate::limits::LimitStatus>,
     goals: Vec<crate::goals::GoalStatus>,
     focus: Option<crate::focus::FocusStatus>,
@@ -82,7 +97,18 @@ fn summary(conn: &rusqlite::Connection, shared: &Shared) -> rusqlite::Result<Sum
     let (active, idle) = an::totals(conn, &day, &day)?;
     let sites = an::site_usage(conn, &day, &day)?;
     let (focus_secs, _) = crate::focus::totals(conn, &day, &day)?;
+    let cats = an::category_usage(conn, &day, &day)?;
+    let (productive, distracting) = an::productive_split(&cats);
     Ok(Summary {
+        top_apps: an::app_usage(conn, &day, &day)?
+            .into_iter()
+            .filter(|a| a.secs > 0)
+            .take(8)
+            .map(|a| AppRow { name: a.name, category: a.category, color: a.color, secs: a.secs })
+            .collect(),
+        productive_secs: productive,
+        distracting_secs: distracting,
+        neutral_secs: (active - productive - distracting).max(0),
         screen_secs: active + idle,
         active_secs: active,
         web_secs: an::site_total(conn, &day, &day)?,
@@ -176,6 +202,44 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
                 Err(e) => req.respond(json_response(500, serde_json::json!({ "error": e }).to_string())),
             };
         }
+        (Method::Post, "/v1/goals/toggle") | (Method::Post, "/v1/notes") => {
+            if header(&req, "X-FocusTrack").is_none() {
+                let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
+                return;
+            }
+            let mut body = String::new();
+            if req.as_reader().take(32 * 1024).read_to_string(&mut body).is_err() {
+                let _ = req.respond(json_response(400, r#"{"error":"bad body"}"#.into()));
+                return;
+            }
+            let Some(conn) = conn else {
+                let _ = req.respond(json_response(500, r#"{"error":"database unavailable"}"#.into()));
+                return;
+            };
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let result = if url == "/v1/notes" {
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    Err("empty note".to_string())
+                } else {
+                    let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
+                    let session = shared.focus.lock().ok().and_then(|f| f.as_ref().map(|a| a.session_id));
+                    crate::notes::create(conn, crate::notes::QUICK_NOTEBOOK, &title, &text, session, now())
+                        .map(|n| serde_json::json!({ "id": n.id }))
+                }
+            } else {
+                match v.get("id").and_then(|i| i.as_i64()) {
+                    Some(id) => crate::goals::toggle_check(conn, id, &crate::analytics::fmt_day(now().date()))
+                        .map(|done| serde_json::json!({ "done": done }))
+                        .map_err(|e| e.to_string()),
+                    None => Err("missing id".to_string()),
+                }
+            };
+            let _ = match result {
+                Ok(v) => req.respond(json_response(200, v.to_string())),
+                Err(e) => req.respond(json_response(400, serde_json::json!({ "error": e }).to_string())),
+            };
+        }
         (Method::Post, "/v1/heartbeat") => {
             if header(&req, "X-FocusTrack").is_none() {
                 let _ = req.respond(json_response(403, r#"{"error":"missing header"}"#.into()));
@@ -208,16 +272,14 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
             }
             let blocked = shared.blocklist.lock().map(|b| b.clone()).unwrap_or_default();
             let focus = crate::focus::status(shared);
-            let focus_blocked = if focus.as_ref().is_some_and(|f| f.phase == crate::focus::Phase::Focus) {
-                shared.focus_blocklist.lock().map(|b| b.clone()).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let focus_blocked = shared.focus_blocklist.lock().map(|b| b.clone()).unwrap_or_default();
+            let allow_only = shared.focus_allow_sites.lock().ok().and_then(|b| b.clone());
             let reply = HeartbeatReply {
                 tracking,
                 blocked: &blocked,
                 focus_blocked: &focus_blocked,
-                focus_ends_at: focus.map(|f| f.ends_at),
+                focus_allow_only: allow_only.as_deref(),
+                focus_ends_at: focus.map(|f| f.plan_ends_at),
             };
             let _ = req.respond(json_response(200, serde_json::to_string(&reply).unwrap_or_default()));
         }

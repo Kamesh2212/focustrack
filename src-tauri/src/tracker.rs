@@ -61,6 +61,10 @@ pub struct Shared {
     pub blocklist: Mutex<Vec<String>>,
     /// Distracting domains blocked while a focus round is running.
     pub focus_blocklist: Mutex<Vec<String>>,
+    /// "Allow only" focus profiles: the only domains that may be visited.
+    pub focus_allow_sites: Mutex<Option<Vec<String>>>,
+    /// Apps to close (limits reached, focus session) — enforced by `blocker.rs`.
+    pub app_blocks: Mutex<crate::blocker::AppBlocks>,
     pub focus: Mutex<Option<crate::focus::ActiveFocus>>,
     pub website_tracking: AtomicBool,
     pub server_running: AtomicBool,
@@ -80,6 +84,8 @@ impl Shared {
             browsers: Mutex::new(HashMap::new()),
             blocklist: Mutex::new(Vec::new()),
             focus_blocklist: Mutex::new(Vec::new()),
+            focus_allow_sites: Mutex::new(None),
+            app_blocks: Mutex::new(crate::blocker::AppBlocks::default()),
             focus: Mutex::new(None),
             website_tracking: AtomicBool::new(true),
             server_running: AtomicBool::new(false),

@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "FocusTrack",
-  "version": "0.2.0",
-  "description": "Shows your FocusTrack screen time on the new tab page and tells the FocusTrack desktop app which website (domain only) is active. No page content, URLs or history leave your computer.",
+  "version": "0.3.0",
+  "description": "FocusTrack widgets in your browser's side panel and toolbar, and website tracking for the FocusTrack desktop app (domains only). Your own new tab page stays exactly as it is.",
   "permissions": [
     "tabs",
     "alarms",
     "storage",
-    "search"
+    "sidePanel"
   ],
   "host_permissions": [
     "http://127.0.0.1:17865/*"
@@ -36,7 +36,15 @@
       "strict_min_version": "121.0"
     }
   },
-  "chrome_url_overrides": {
-    "newtab": "newtab.html"
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "sidebar_action": {
+    "default_panel": "sidepanel.html",
+    "default_title": "FocusTrack",
+    "default_icon": {
+      "32": "icons/32.png"
+    },
+    "open_at_install": false
   }
 }

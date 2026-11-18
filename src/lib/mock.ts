@@ -17,6 +17,10 @@ import type {
   FocusStatus,
   GoalStatus,
   InstalledApp,
+  BlockPreview,
+  Note,
+  Profile,
+  Resource,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -55,9 +59,9 @@ const SITES: [number, string, number, number][] = [
 ];
 
 let limits: LimitStatus[] = [
-  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, block: true, enabled: true, usedSecs: 3010 },
-  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, block: false, enabled: true, usedSecs: 1950 },
-  { id: 3, targetType: "app", targetId: 6, name: "Steam", color: "#8b5cf6", dailyLimitSecs: 7200, warnPct: 80, block: false, enabled: true, usedSecs: 2400 },
+  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", key: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, action: "block", enabled: true, usedSecs: 3010, extraSecs: 0, overridesUsed: 0 },
+  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", key: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, action: "notify", enabled: true, usedSecs: 1950, extraSecs: 0, overridesUsed: 0 },
+  { id: 3, targetType: "app", targetId: 6, name: "Steam", key: "steam.exe", color: "#8b5cf6", dailyLimitSecs: 2700, warnPct: 80, action: "warn_then_block", enabled: true, usedSecs: 2400, extraSecs: 0, overridesUsed: 0 },
 ];
 let nextLimitId = 4;
 
@@ -73,18 +77,68 @@ let nextAppId = 100;
 
 let focusActive: FocusStatus | null = null;
 const focusHistory = [
-  { id: 3, label: "Deep work", day: today(), start: `${today()} 09:10:00`, end: `${today()} 10:00:00`, plannedSecs: 3000, actualSecs: 3000, completed: true },
-  { id: 2, label: "Pomodoro", day: addDays(today(), -1), start: `${addDays(today(), -1)} 14:00:00`, end: `${addDays(today(), -1)} 14:25:00`, plannedSecs: 1500, actualSecs: 1500, completed: true },
-  { id: 1, label: "Study session", day: addDays(today(), -1), start: `${addDays(today(), -1)} 19:00:00`, end: `${addDays(today(), -1)} 19:40:00`, plannedSecs: 5400, actualSecs: 2400, completed: false },
+  { id: 3, label: "Deep work", mode: "focus" as const, subject: null, goalText: "Finish chapter 3", goalId: null, day: today(), start: `${today()} 09:10:00`, end: `${today()} 10:00:00`, plannedSecs: 3000, actualSecs: 3000, completed: true },
+  { id: 2, label: "Pomodoro", mode: "focus" as const, subject: null, goalText: null, goalId: null, day: addDays(today(), -1), start: `${addDays(today(), -1)} 14:00:00`, end: `${addDays(today(), -1)} 14:25:00`, plannedSecs: 1500, actualSecs: 1500, completed: true },
+  { id: 1, label: "Maths", mode: "study" as const, subject: "Maths", goalText: "Problem set 4", goalId: null, day: addDays(today(), -1), start: `${addDays(today(), -1)} 19:00:00`, end: `${addDays(today(), -1)} 19:40:00`, plannedSecs: 5400, actualSecs: 2400, completed: false },
 ];
 
 let goals: GoalStatus[] = [
-  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h" },
-  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education" },
-  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m" },
-  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions" },
+  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, title: null, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h" },
+  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, title: null, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education" },
+  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, title: null, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m" },
+  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, title: null, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions" },
+  { id: 5, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Read 20 pages", enabled: true, current: 0, state: "in_progress", label: "Read 20 pages" },
+  { id: 6, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Exercise for 30 minutes", enabled: true, current: 1, state: "achieved", label: "Exercise for 30 minutes" },
 ];
-let nextGoalId = 5;
+let nextGoalId = 7;
+
+let profiles: Profile[] = [
+  { id: 1, name: "Study Mode", mode: "block", categories: ["Gaming", "Entertainment", "Social Media"], apps: [], sites: [], unblockOnBreaks: false, endEarly: "confirm", builtin: true },
+  { id: 2, name: "Work Mode", mode: "block", categories: ["Gaming", "Entertainment"], apps: [], sites: ["reddit.com", "instagram.com", "x.com"], unblockOnBreaks: false, endEarly: "allow", builtin: true },
+  { id: 3, name: "Deep Focus", mode: "allow_only", categories: ["Study", "Education", "Development", "Productivity"], apps: [], sites: ["google.com", "github.com", "stackoverflow.com"], unblockOnBreaks: false, endEarly: "strict", builtin: true },
+  { id: 4, name: "Personal", mode: "block", categories: [], apps: [], sites: [], unblockOnBreaks: false, endEarly: "confirm", builtin: true },
+];
+let nextProfileId = 5;
+
+function previewFor(id: number): BlockPreview {
+  const p = profiles.find((x) => x.id === id)!;
+  const all = [
+    { name: "Steam", exeName: "steam.exe", category: "Gaming" },
+    { name: "Epic Games Launcher", exeName: "EpicGamesLauncher.exe", category: "Gaming" },
+    { name: "Spotify", exeName: "Spotify.exe", category: "Entertainment" },
+    { name: "Netflix", exeName: "Netflix.exe", category: "Entertainment" },
+    { name: "Discord", exeName: "Discord.exe", category: "Communication" },
+    { name: "Visual Studio Code", exeName: "Code.exe", category: "Development" },
+    { name: "Microsoft Word", exeName: "WINWORD.EXE", category: "Productivity" },
+    { name: "Anki", exeName: "anki.exe", category: "Study" },
+  ];
+  const sites: Record<string, string> = {
+    "youtube.com": "Entertainment", "netflix.com": "Entertainment", "twitch.tv": "Entertainment",
+    "instagram.com": "Social Media", "reddit.com": "Social Media", "tiktok.com": "Social Media",
+    "coursera.org": "Study", "khanacademy.org": "Study", "wikipedia.org": "Education", "github.com": "Development",
+  };
+  const inCats = (c: string) => p.categories.includes(c);
+  const chosen = all.filter((a) => inCats(a.category) || p.apps.includes(a.exeName.toLowerCase()));
+  const siteList = [...Object.entries(sites).filter(([, c]) => inCats(c)).map(([d]) => d), ...p.sites].sort();
+  return p.mode === "allow_only"
+    ? { mode: p.mode, blockedApps: all.filter((a) => !chosen.includes(a)), blockedSites: [], allowedApps: chosen, allowedSites: siteList }
+    : { mode: p.mode, blockedApps: chosen, blockedSites: siteList, allowedApps: [], allowedSites: [] };
+}
+
+let notes: Note[] = [
+  { id: 1, notebook: "Maths", title: "Limits", body: "lim x→0 sin(x)/x = 1\n\nSqueeze theorem proof: …", focusSessionId: 3, sessionLabel: "Study session", createdAt: `${today()} 09:20:00`, updatedAt: `${today()} 09:40:00` },
+  { id: 2, notebook: "Physics", title: "Newton's laws", body: "1. Inertia\n2. F = ma\n3. Action–reaction", focusSessionId: null, sessionLabel: null, createdAt: `${today()} 08:00:00`, updatedAt: `${today()} 08:05:00` },
+  { id: 3, notebook: "Quick notes", title: "Email Prof. about deadline", body: "Email Prof. about deadline", focusSessionId: null, sessionLabel: null, createdAt: `${today()} 11:00:00`, updatedAt: `${today()} 11:00:00` },
+];
+let nextNoteId = 4;
+
+let resources: Resource[] = [
+  { id: 1, title: "Google Scholar", url: "https://scholar.google.com", subject: null },
+  { id: 2, title: "Khan Academy", url: "https://www.khanacademy.org", subject: null },
+  { id: 3, title: "Coursera", url: "https://www.coursera.org", subject: null },
+  { id: 4, title: "MIT OCW Calculus", url: "https://ocw.mit.edu/courses/18-01sc", subject: "Maths" },
+];
+let nextResourceId = 5;
 
 function stamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
@@ -96,7 +150,14 @@ function startFocus(plan: FocusPlan): FocusStatus {
   const end = new Date(start.getTime() + plan.focusMins * 60000);
   focusActive = {
     label: plan.label, phase: "focus", round: 1, rounds: plan.rounds, startedAt: stamp(start), endsAt: stamp(end),
-    remainingSecs: plan.focusMins * 60, totalSecs: plan.focusMins * 60, blockDistracting: plan.blockDistracting, plan,
+    remainingSecs: plan.focusMins * 60, totalSecs: plan.focusMins * 60, plan,
+    mode: plan.mode, subject: plan.subject, goalText: plan.goalText,
+    planEndsAt: stamp(new Date(start.getTime() + (plan.focusMins * plan.rounds + plan.breakMins * (plan.rounds - 1)) * 60000)),
+    profileName: profiles.find((p) => p.id === plan.profileId)?.name ?? null,
+    blocking: plan.profileId != null,
+    preview: plan.profileId != null ? previewFor(plan.profileId) : null,
+    endEarly: profiles.find((p) => p.id === plan.profileId)?.endEarly ?? "allow",
+    stopWaitSecs: null,
   };
   return focusActive;
 }
@@ -114,6 +175,9 @@ const settings: Settings = {
   idleThresholdSecs: 300,
   autostart: true,
   theme: "system",
+  overridesPerDay: 1,
+  goalReminder: "20:00",
+  dashboardLayout: "",
   notificationsEnabled: true,
   breakReminderMins: 120,
   websiteTracking: true,
@@ -372,19 +436,112 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
           const left = Math.max(0, Math.round((new Date(focusActive.endsAt.replace(" ", "T")).getTime() - Date.now()) / 1000));
           focusActive = { ...focusActive, remainingSecs: left };
         }
-        return { active: focusActive, todaySecs: 3000, todaySessions: 1, weekSecs: 6900, weekSessions: 2, streakDays: 2, history: focusHistory };
+        const hist = a.mode ? focusHistory.filter((h) => h.mode === a.mode) : focusHistory;
+        return { active: focusActive, todaySecs: 3000, todaySessions: 1, weekSecs: 6900, weekSessions: 2, streakDays: 2, history: hist, stopPhrase: "I want to stop" };
       }
       case "start_focus":
         return startFocus(a.plan);
-      case "stop_focus":
+      case "stop_focus": {
+        const rule = focusActive?.endEarly ?? "allow";
+        if (rule !== "allow" && String(a.phrase ?? "").trim().toLowerCase() !== "i want to stop")
+          throw new Error('Type "I want to stop" to end the session early');
         focusActive = null;
+        return null;
+      }
+      case "request_stop_focus":
+        if (focusActive) focusActive = { ...focusActive, stopWaitSecs: 0 };
+        return 0;
+      case "preview_profile":
+        return previewFor(a.profileId);
+      case "get_profiles":
+        return profiles.map((p) => ({ ...p }));
+      case "save_profile": {
+        const p = a.profile as unknown as Profile;
+        if (p.id) profiles = profiles.map((x) => (x.id === p.id ? { ...p, builtin: x.builtin } : x));
+        else profiles.push({ ...p, id: nextProfileId++, builtin: false });
+        return p.id ?? nextProfileId - 1;
+      }
+      case "delete_profile":
+        profiles = profiles.filter((p) => p.id !== a.id || p.builtin);
+        return null;
+      case "toggle_goal": {
+        const g = goals.find((x) => x.id === a.id);
+        if (g) {
+          g.current = g.current ? 0 : 1;
+          g.state = g.current ? "achieved" : "in_progress";
+        }
+        return !!g?.current;
+      }
+      case "get_notebooks": {
+        const map = new Map<string, { name: string; count: number; updatedAt: string }>();
+        for (const n of notes) {
+          const nb = map.get(n.notebook) ?? { name: n.notebook, count: 0, updatedAt: n.updatedAt };
+          nb.count++;
+          if (n.updatedAt > nb.updatedAt) nb.updatedAt = n.updatedAt;
+          map.set(n.notebook, nb);
+        }
+        return [...map.values()].sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
+      }
+      case "get_notes": {
+        const q = String(a.search ?? "").toLowerCase();
+        return notes
+          .filter((n) => (!a.notebook || n.notebook === a.notebook) && (!q || (n.title + n.body).toLowerCase().includes(q)))
+          .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
+      }
+      case "create_note": {
+        const n: Note = {
+          id: nextNoteId++, notebook: String(a.notebook || "General"), title: String(a.title), body: String(a.body),
+          focusSessionId: null, sessionLabel: focusActive?.label ?? null, createdAt: stamp(new Date()), updatedAt: stamp(new Date()),
+        };
+        notes.push(n);
+        return n;
+      }
+      case "update_note": {
+        const n = notes.find((x) => x.id === a.id)!;
+        Object.assign(n, { notebook: a.notebook || "General", title: a.title, body: a.body, updatedAt: stamp(new Date()) });
+        return { ...n };
+      }
+      case "delete_note":
+        notes = notes.filter((n) => n.id !== a.id);
+        return null;
+      case "get_resources":
+        return resources;
+      case "add_resource":
+        if (!/^https?:\/\//.test(String(a.url))) throw new Error("Enter a full web address starting with https://");
+        resources.push({ id: nextResourceId++, title: a.title, url: a.url, subject: a.subject });
+        return null;
+      case "delete_resource":
+        resources = resources.filter((r) => r.id !== a.id);
+        return null;
+      case "open_url":
+        window.open(String(a.url), "_blank", "noopener");
+        return null;
+      case "get_study_time":
+        return [5400, 21600];
+      case "override_limit": {
+        const l = limits.find((x) => x.id === a.id);
+        if (l) {
+          if (l.overridesUsed >= settings.overridesPerDay) throw new Error("You've used all your extensions for today");
+          l.extraSecs += 900;
+          l.overridesUsed += 1;
+        }
+        return null;
+      }
+      case "set_overrides_per_day":
+        settings.overridesPerDay = a.count;
+        return null;
+      case "set_goal_reminder":
+        settings.goalReminder = a.time;
+        return null;
+      case "set_dashboard_layout":
+        settings.dashboardLayout = a.layout;
         return null;
       case "get_goals":
         return goals.map((g) => ({ ...g }));
       case "set_goal": {
         const g = args as unknown as GoalStatus;
         const cat = CATEGORIES.find((c) => c.id === g.categoryId) ?? null;
-        const base = { ...g, category: cat?.name ?? null, color: cat?.color ?? "#6366f1", label: goalLabel(g.kind, cat?.name ?? null, g.target) };
+        const base = { ...g, category: cat?.name ?? null, color: cat?.color ?? "#6366f1", label: g.kind === "custom" ? g.title ?? "" : g.title ? `${g.title}` : goalLabel(g.kind, cat?.name ?? null, g.target) };
         if (g.id) goals = goals.map((x) => (x.id === g.id ? { ...x, ...base } : x));
         else goals.push({ ...base, id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
         return null;

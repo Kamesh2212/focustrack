@@ -12,7 +12,10 @@ pub struct ForegroundApp {
     pub exe_path: String,
 }
 
-pub use imp::{file_description, foreground_app, idle_seconds, is_session_locked};
+pub use imp::{
+    close_windows, file_description, foreground_app, foreground_pid, idle_seconds, is_session_locked, process_image,
+    processes, terminate,
+};
 
 /// Returns the last path component (`C:\a\b.exe` -> `b.exe`).
 pub fn file_name(path: &str) -> &str {
@@ -51,13 +54,96 @@ mod imp {
         CloseDesktop, OpenInputDesktop, SwitchDesktop,
     };
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetForegroundWindow, GetWindowThreadProcessId,
+        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+        WM_CLOSE,
     };
+
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    /// All running processes as (pid, exe name).
+    pub fn processes() -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut entry) != 0;
+            while ok {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                out.push((entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile[..len])));
+                ok = Process32NextW(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+        }
+        out
+    }
+
+    pub fn process_image(pid: u32) -> Option<String> {
+        unsafe { process_path(pid) }
+    }
+
+    pub fn foreground_pid() -> Option<u32> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            (pid != 0).then_some(pid)
+        }
+    }
+
+    struct CloseSearch {
+        pid: u32,
+        sent: u32,
+    }
+
+    unsafe extern "system" fn close_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let s = &mut *(lparam as *mut CloseSearch);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == s.pid && IsWindowVisible(hwnd) != 0 {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            s.sent += 1;
+        }
+        1
+    }
+
+    /// Politely asks a process's visible windows to close (lets apps offer to
+    /// save). Returns how many windows were asked.
+    pub fn close_windows(pid: u32) -> u32 {
+        let mut s = CloseSearch { pid, sent: 0 };
+        unsafe {
+            EnumWindows(Some(close_cb), &mut s as *mut CloseSearch as LPARAM);
+        }
+        s.sent
+    }
+
+    /// Force-closes a process. Used only after `close_windows` was ignored.
+    pub fn terminate(pid: u32) -> bool {
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let ok = TerminateProcess(h, 1) != 0;
+            CloseHandle(h);
+            ok
+        }
+    }
 
     const DESKTOP_SWITCHDESKTOP: u32 = 0x0100;
 
@@ -231,6 +317,21 @@ mod imp {
     }
     pub fn file_description(_path: &str) -> Option<String> {
         None
+    }
+    pub fn processes() -> Vec<(u32, String)> {
+        Vec::new()
+    }
+    pub fn process_image(_pid: u32) -> Option<String> {
+        None
+    }
+    pub fn foreground_pid() -> Option<u32> {
+        None
+    }
+    pub fn close_windows(_pid: u32) -> u32 {
+        0
+    }
+    pub fn terminate(_pid: u32) -> bool {
+        false
     }
 }
 

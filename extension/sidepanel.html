@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FocusTrack</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="panel">
+    <header>
+      <img src="icons/32.png" alt="" width="22" height="22" />
+      <strong>FocusTrack</strong>
+      <button id="customize" class="icon-btn" type="button" aria-expanded="false" title="Choose widgets">Customize</button>
+    </header>
+
+    <section id="chooser" class="chooser" hidden>
+      <p class="small muted">Pick the widgets to show and use the arrows to reorder them. Saved in your browser.</p>
+      <ul id="chooser-list"></ul>
+    </section>
+
+    <p id="offline" class="card offline" hidden>The FocusTrack app isn't running, so today's usage isn't available.</p>
+    <main id="widgets"></main>
+    <p class="note">Your browser's own new tab page is untouched. Keep this panel open beside it.</p>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

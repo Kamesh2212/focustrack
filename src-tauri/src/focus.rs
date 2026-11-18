@@ -1,23 +1,29 @@
-//! Focus Mode (SRS 2.7): single sessions and Pomodoro cycles.
+//! Focus Mode and Study Mode (SRS 2.7; improvements doc §5, §7).
 //!
-//! The timer runs here in the backend (on its own thread), so it keeps going
-//! with the window closed and survives page reloads. Each focus round and
-//! break is a row in `focus_sessions`. While a focus round with
-//! `block_distracting` is running, distracting websites go on the extension's
-//! block list.
+//! The timer runs in the backend (on its own thread), so it keeps going with
+//! the window closed. Each focus round and break is a row in
+//! `focus_sessions`. A session can use a blocking profile: its apps and
+//! websites stay blocked for the whole session (breaks included, unless the
+//! profile says otherwise) and open again automatically when it finishes.
+//! Ending early follows the profile's rule: allowed, confirm with a phrase,
+//! or strict (request, wait a minute, then confirm).
 
-use crate::categories::{DISTRACTING, DOMAIN_MAP};
+use crate::blocker::AppBlocks;
 use crate::db;
+use crate::installed;
 use crate::limits::notify;
+use crate::profiles::{self, BlockPreview, Profile};
 use crate::tracker::Shared;
 use chrono::{Duration, Local, NaiveDateTime, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
+
+pub const STOP_PHRASE: &str = "I want to stop";
+pub const STRICT_WAIT_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +35,23 @@ pub struct FocusPlan {
     /// Every 4th break; 0 = same as `break_mins`
     pub long_break_mins: u32,
     pub rounds: u32,
-    pub block_distracting: bool,
+    /// Blocking profile; None = nothing blocked.
+    #[serde(default)]
+    pub profile_id: Option<i64>,
+    /// `focus` | `study`
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Free-text goal ("Finish the assignment") or a linked goal.
+    #[serde(default)]
+    pub goal_text: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<i64>,
+}
+
+fn default_mode() -> String {
+    "focus".into()
 }
 
 impl FocusPlan {
@@ -46,6 +68,9 @@ impl FocusPlan {
         if self.label.trim().is_empty() || self.label.len() > 80 {
             return Err("Give the session a short name".into());
         }
+        if self.mode != "focus" && self.mode != "study" {
+            return Err("Unknown session mode".into());
+        }
         Ok(())
     }
 }
@@ -60,43 +85,40 @@ pub enum Phase {
 #[derive(Debug, Clone)]
 pub struct ActiveFocus {
     pub plan: FocusPlan,
+    pub profile: Option<Profile>,
+    pub preview: Option<BlockPreview>,
     pub phase: Phase,
     pub round: u32,
     pub session_id: i64,
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
+    pub stop_requested: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FocusStatus {
     pub label: String,
+    pub mode: String,
+    pub subject: Option<String>,
+    pub goal_text: Option<String>,
     pub phase: Phase,
     pub round: u32,
     pub rounds: u32,
     pub started_at: String,
     pub ends_at: String,
+    /// When the whole plan (all rounds and breaks) finishes.
+    pub plan_ends_at: String,
     pub remaining_secs: i64,
     pub total_secs: i64,
-    pub block_distracting: bool,
+    pub profile_name: Option<String>,
+    pub blocking: bool,
+    pub preview: Option<BlockPreview>,
+    /// `allow` | `confirm` | `strict`
+    pub end_early: String,
+    /// Strict mode: seconds until ending is allowed (after a request).
+    pub stop_wait_secs: Option<i64>,
     pub plan: FocusPlan,
-}
-
-impl ActiveFocus {
-    pub fn status(&self, now: NaiveDateTime) -> FocusStatus {
-        FocusStatus {
-            label: self.plan.label.clone(),
-            phase: self.phase,
-            round: self.round,
-            rounds: self.plan.rounds,
-            started_at: db::fmt_time(self.start),
-            ends_at: db::fmt_time(self.end),
-            remaining_secs: (self.end - now).num_seconds().max(0),
-            total_secs: (self.end - self.start).num_seconds(),
-            block_distracting: self.plan.block_distracting,
-            plan: self.plan.clone(),
-        }
-    }
 }
 
 /// What happens when a phase ends.
@@ -112,11 +134,72 @@ pub fn next_phase(plan: &FocusPlan, phase: Phase, round: u32) -> Next {
     match phase {
         Phase::Focus if round >= plan.rounds => Next::Done,
         Phase::Focus if plan.break_mins == 0 => Next::Focus { round: round + 1 },
-        Phase::Focus => {
-            let long = plan.long_break_mins > 0 && round % 4 == 0;
-            Next::Break { round, mins: if long { plan.long_break_mins } else { plan.break_mins } }
-        }
+        Phase::Focus => Next::Break { round, mins: break_len(plan, round) },
         Phase::Break => Next::Focus { round: round + 1 },
+    }
+}
+
+fn break_len(plan: &FocusPlan, round: u32) -> u32 {
+    if plan.long_break_mins > 0 && round % 4 == 0 {
+        plan.long_break_mins
+    } else {
+        plan.break_mins
+    }
+}
+
+/// Remaining seconds of the whole plan after the current phase ends.
+fn rest_of_plan_secs(plan: &FocusPlan, phase: Phase, round: u32) -> i64 {
+    let mut secs = 0i64;
+    let (mut ph, mut r) = (phase, round);
+    loop {
+        match next_phase(plan, ph, r) {
+            Next::Done => break,
+            Next::Break { round, mins } => {
+                secs += mins as i64 * 60;
+                ph = Phase::Break;
+                r = round;
+            }
+            Next::Focus { round } => {
+                secs += plan.focus_mins as i64 * 60;
+                ph = Phase::Focus;
+                r = round;
+            }
+        }
+    }
+    secs
+}
+
+impl ActiveFocus {
+    fn blocking_now(&self) -> bool {
+        self.preview.is_some()
+            && (self.phase == Phase::Focus || !self.profile.as_ref().is_some_and(|p| p.unblock_on_breaks))
+    }
+
+    pub fn status(&self, now: NaiveDateTime) -> FocusStatus {
+        let end_early = self.profile.as_ref().map_or("allow".to_string(), |p| p.end_early.clone());
+        let stop_wait_secs = self
+            .stop_requested
+            .map(|t| (STRICT_WAIT_SECS - (now - t).num_seconds()).max(0));
+        FocusStatus {
+            label: self.plan.label.clone(),
+            mode: self.plan.mode.clone(),
+            subject: self.plan.subject.clone(),
+            goal_text: self.plan.goal_text.clone(),
+            phase: self.phase,
+            round: self.round,
+            rounds: self.plan.rounds,
+            started_at: db::fmt_time(self.start),
+            ends_at: db::fmt_time(self.end),
+            plan_ends_at: db::fmt_time(self.end + Duration::seconds(rest_of_plan_secs(&self.plan, self.phase, self.round))),
+            remaining_secs: (self.end - now).num_seconds().max(0),
+            total_secs: (self.end - self.start).num_seconds(),
+            profile_name: self.profile.as_ref().map(|p| p.name.clone()),
+            blocking: self.blocking_now(),
+            preview: self.preview.clone(),
+            end_early,
+            stop_wait_secs,
+            plan: self.plan.clone(),
+        }
     }
 }
 
@@ -133,17 +216,23 @@ fn fmt_mins(m: u32) -> String {
     }
 }
 
-fn insert_row(conn: &Connection, plan: &FocusPlan, phase: Phase, secs: i64, start: NaiveDateTime) -> rusqlite::Result<i64> {
+fn insert_row(conn: &Connection, plan: &FocusPlan, phase: Phase, secs: i64, start: NaiveDateTime, blocking: bool) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO focus_sessions (label, kind, planned_secs, day, start_time, block_distracting)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO focus_sessions (label, kind, planned_secs, day, start_time, block_distracting,
+                                     mode, subject, goal_text, goal_id, profile_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             plan.label.trim(),
             if phase == Phase::Focus { "focus" } else { "break" },
             secs,
             start.format(db::DAY_FMT).to_string(),
             db::fmt_time(start),
-            plan.block_distracting && phase == Phase::Focus,
+            blocking,
+            plan.mode,
+            plan.subject.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+            plan.goal_text.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+            plan.goal_id,
+            plan.profile_id,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -157,65 +246,120 @@ fn close_row(conn: &Connection, id: i64, start: NaiveDateTime, end: NaiveDateTim
     Ok(())
 }
 
-/// Domains in a distracting category: the built-in list, adjusted by the
-/// user's own website categories.
-pub fn distracting_domains(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut set: BTreeSet<String> = DOMAIN_MAP
-        .iter()
-        .filter(|(_, c)| DISTRACTING.contains(c))
-        .map(|(d, _)| d.to_string())
-        .collect();
-    let mut stmt = conn.prepare(
-        "SELECT w.domain, COALESCE(c.kind, 'neutral') FROM websites w LEFT JOIN categories c ON c.id = w.category_id",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows {
-        let (domain, kind) = row?;
-        if kind == "distracting" {
-            set.insert(domain);
-        } else {
-            set.remove(&domain);
+/// Pushes the session's block lists to the blocker and the browser extension.
+fn apply_blocks(shared: &Shared, active: Option<&ActiveFocus>) {
+    let on = active.filter(|a| a.blocking_now());
+    let (sites, allow_sites, apps) = match on.and_then(|a| a.preview.as_ref().map(|p| (a, p))) {
+        Some((a, p)) => {
+            let label = format!("{} (until {})", a.plan.label, a.status(now()).plan_ends_at.get(11..16).unwrap_or(""));
+            let blocks = if p.mode == "allow_only" {
+                AppBlocks {
+                    allow_only: Some(p.allowed_apps.iter().map(|x| x.exe_name.to_ascii_lowercase()).collect()),
+                    focus_label: Some(label),
+                    ..Default::default()
+                }
+            } else {
+                AppBlocks {
+                    focus: p.blocked_apps.iter().map(|x| (x.exe_name.to_ascii_lowercase(), x.name.clone())).collect(),
+                    focus_label: Some(label),
+                    ..Default::default()
+                }
+            };
+            let allow = (p.mode == "allow_only").then(|| p.allowed_sites.clone());
+            (p.blocked_sites.clone(), allow, Some(blocks))
         }
-    }
-    Ok(set.into_iter().collect())
-}
-
-fn set_focus_block(conn: &Connection, shared: &Shared, on: bool) {
-    let list = if on { distracting_domains(conn).unwrap_or_default() } else { Vec::new() };
+        None => (Vec::new(), None, None),
+    };
     if let Ok(mut b) = shared.focus_blocklist.lock() {
-        *b = list;
+        *b = sites;
+    }
+    if let Ok(mut b) = shared.focus_allow_sites.lock() {
+        *b = allow_sites;
+    }
+    if let Ok(mut b) = shared.app_blocks.lock() {
+        let limit = std::mem::take(&mut b.limit);
+        *b = apps.unwrap_or_default();
+        b.limit = limit;
     }
 }
 
-fn begin(conn: &Connection, shared: &Shared, plan: FocusPlan, phase: Phase, round: u32, mins: u32, at: NaiveDateTime) -> rusqlite::Result<ActiveFocus> {
-    let secs = mins as i64 * 60;
-    let id = insert_row(conn, &plan, phase, secs, at)?;
-    set_focus_block(conn, shared, plan.block_distracting && phase == Phase::Focus);
-    Ok(ActiveFocus { plan, phase, round, session_id: id, start: at, end: at + Duration::seconds(secs) })
+/// Resolves what a profile would block right now (for the pre-start preview).
+pub fn preview(conn: &Connection, profile_id: i64) -> Result<(Profile, BlockPreview), String> {
+    let p = profiles::get(conn, profile_id).map_err(|e| e.to_string())?.ok_or("Profile not found")?;
+    let prev = profiles::resolve(conn, &p, &installed::cached()).map_err(|e| e.to_string())?;
+    Ok((p, prev))
 }
 
-/// Starts a new plan, ending any session in progress.
+fn begin(conn: &Connection, plan: FocusPlan, profile: Option<Profile>, preview: Option<BlockPreview>, phase: Phase, round: u32, mins: u32, at: NaiveDateTime) -> rusqlite::Result<ActiveFocus> {
+    let secs = mins as i64 * 60;
+    let mut a = ActiveFocus { plan, profile, preview, phase, round, session_id: 0, start: at, end: at + Duration::seconds(secs), stop_requested: None };
+    a.session_id = insert_row(conn, &a.plan, phase, secs, at, a.blocking_now())?;
+    Ok(a)
+}
+
+/// Starts a new plan. Fails if a session is already running.
 pub fn start(conn: &Connection, shared: &Shared, plan: FocusPlan) -> Result<FocusStatus, String> {
     plan.validate()?;
+    if shared.focus.lock().map(|f| f.is_some()).unwrap_or(false) {
+        return Err("A session is already running. End it first.".into());
+    }
+    let (profile, prev) = match plan.profile_id {
+        Some(id) => {
+            let (p, prev) = preview(conn, id)?;
+            (Some(p), Some(prev))
+        }
+        None => (None, None),
+    };
     let at = now();
-    stop(conn, shared).map_err(|e| e.to_string())?;
     let mins = plan.focus_mins;
-    let active = begin(conn, shared, plan, Phase::Focus, 1, mins, at).map_err(|e| e.to_string())?;
+    let active = begin(conn, plan, profile, prev, Phase::Focus, 1, mins, at).map_err(|e| e.to_string())?;
     let status = active.status(at);
+    apply_blocks(shared, Some(&active));
     if let Ok(mut f) = shared.focus.lock() {
         *f = Some(active);
     }
     Ok(status)
 }
 
-/// Ends the current session early (recorded as not completed).
-pub fn stop(conn: &Connection, shared: &Shared) -> rusqlite::Result<()> {
+/// Strict profiles: ask to end early; ending is possible after a short wait.
+pub fn request_stop(shared: &Shared) -> Result<i64, String> {
+    let mut f = shared.focus.lock().map_err(|e| e.to_string())?;
+    let a = f.as_mut().ok_or("No session is running")?;
     let at = now();
-    let current = shared.focus.lock().ok().and_then(|mut f| f.take());
-    if let Some(a) = current {
-        close_row(conn, a.session_id, a.start, at.min(a.end), false)?;
+    let t = *a.stop_requested.get_or_insert(at);
+    Ok((STRICT_WAIT_SECS - (at - t).num_seconds()).max(0))
+}
+
+/// Checks the profile's early-end rule.
+pub fn can_stop(a: &ActiveFocus, phrase: Option<&str>, at: NaiveDateTime) -> Result<(), String> {
+    let rule = a.profile.as_ref().map_or("allow", |p| p.end_early.as_str());
+    let phrase_ok = phrase.is_some_and(|p| p.trim().eq_ignore_ascii_case(STOP_PHRASE));
+    match rule {
+        "allow" => Ok(()),
+        "confirm" if phrase_ok => Ok(()),
+        "confirm" => Err(format!("Type \"{STOP_PHRASE}\" to end the session early")),
+        _ => match a.stop_requested {
+            None => Err("Request to end the session first".into()),
+            Some(t) if (at - t).num_seconds() < STRICT_WAIT_SECS => {
+                Err(format!("You can end the session in {} seconds", STRICT_WAIT_SECS - (at - t).num_seconds()))
+            }
+            Some(_) if phrase_ok => Ok(()),
+            Some(_) => Err(format!("Type \"{STOP_PHRASE}\" to end the session early")),
+        },
     }
-    set_focus_block(conn, shared, false);
+}
+
+/// Ends the current session early (recorded as not completed).
+pub fn stop(conn: &Connection, shared: &Shared, phrase: Option<&str>) -> Result<(), String> {
+    let at = now();
+    let mut f = shared.focus.lock().map_err(|e| e.to_string())?;
+    if let Some(a) = f.as_ref() {
+        can_stop(a, phrase, at)?;
+        close_row(conn, a.session_id, a.start, at.min(a.end), false).map_err(|e| e.to_string())?;
+    }
+    *f = None;
+    drop(f);
+    apply_blocks(shared, None);
     Ok(())
 }
 
@@ -247,30 +391,28 @@ pub fn tick(conn: &Connection, shared: &Shared, at: NaiveDateTime, save_progress
     let rounds = a.plan.rounds;
     let note = match next_phase(&a.plan, a.phase, a.round) {
         Next::Done => {
-            set_focus_block(conn, shared, false);
+            let unblocked = if a.preview.is_some() { " Blocked apps and websites are available again." } else { "" };
+            let goal = a.plan.goal_text.as_deref().map(|g| format!(" Did you finish \"{g}\"?")).unwrap_or_default();
             let body = if rounds > 1 {
-                format!("All {rounds} rounds of \"{}\" are done. Nice work!", a.plan.label)
+                format!("All {rounds} rounds of \"{}\" are done.{unblocked}{goal}", a.plan.label)
             } else {
-                format!("You completed a {} focus session: {}.", fmt_mins(a.plan.focus_mins), a.plan.label)
+                format!("You completed a {} session: {}.{unblocked}{goal}", fmt_mins(a.plan.focus_mins), a.plan.label)
             };
-            ("Focus session complete".to_string(), body)
+            (if a.plan.mode == "study" { "Study session complete" } else { "Focus session complete" }.to_string(), body)
         }
         Next::Break { round, mins } => {
-            *guard = Some(begin(conn, shared, a.plan.clone(), Phase::Break, round, mins, a.end)?);
-            (
-                format!("Round {round} of {rounds} done"),
-                format!("Time for a {} break.", fmt_mins(mins)),
-            )
+            *guard = Some(begin(conn, a.plan.clone(), a.profile.clone(), a.preview.clone(), Phase::Break, round, mins, a.end)?);
+            (format!("Round {round} of {rounds} done"), format!("Time for a {} break.", fmt_mins(mins)))
         }
         Next::Focus { round } => {
             let mins = a.plan.focus_mins;
-            *guard = Some(begin(conn, shared, a.plan.clone(), Phase::Focus, round, mins, a.end)?);
-            (
-                "Back to focus".to_string(),
-                format!("Round {round} of {rounds} of \"{}\" has started.", a.plan.label),
-            )
+            *guard = Some(begin(conn, a.plan.clone(), a.profile.clone(), a.preview.clone(), Phase::Focus, round, mins, a.end)?);
+            ("Back to focus".to_string(), format!("Round {round} of {rounds} of \"{}\" has started.", a.plan.label))
         }
     };
+    let current = guard.clone();
+    drop(guard);
+    apply_blocks(shared, current.as_ref());
     Ok(Some(note))
 }
 
@@ -279,6 +421,10 @@ pub fn tick(conn: &Connection, shared: &Shared, at: NaiveDateTime, save_progress
 pub struct FocusRecord {
     pub id: i64,
     pub label: String,
+    pub mode: String,
+    pub subject: Option<String>,
+    pub goal_text: Option<String>,
+    pub goal_id: Option<i64>,
     pub day: String,
     pub start: String,
     pub end: Option<String>,
@@ -287,43 +433,50 @@ pub struct FocusRecord {
     pub completed: bool,
 }
 
-pub fn history(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FocusRecord>> {
+pub fn history(conn: &Connection, mode: Option<&str>, limit: i64) -> rusqlite::Result<Vec<FocusRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, label, day, start_time, end_time, planned_secs, actual_secs, completed
-         FROM focus_sessions WHERE kind = 'focus' AND end_time IS NOT NULL
-         ORDER BY start_time DESC LIMIT ?1",
+        "SELECT id, label, mode, subject, goal_text, goal_id, day, start_time, end_time, planned_secs, actual_secs, completed
+         FROM focus_sessions WHERE kind = 'focus' AND end_time IS NOT NULL AND (?1 IS NULL OR mode = ?1)
+         ORDER BY start_time DESC LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![limit], |r| {
+    let rows = stmt.query_map(params![mode, limit], |r| {
         Ok(FocusRecord {
             id: r.get(0)?,
             label: r.get(1)?,
-            day: r.get(2)?,
-            start: r.get(3)?,
-            end: r.get(4)?,
-            planned_secs: r.get(5)?,
-            actual_secs: r.get(6)?,
-            completed: r.get::<_, i64>(7)? != 0,
+            mode: r.get(2)?,
+            subject: r.get(3)?,
+            goal_text: r.get(4)?,
+            goal_id: r.get(5)?,
+            day: r.get(6)?,
+            start: r.get(7)?,
+            end: r.get(8)?,
+            planned_secs: r.get(9)?,
+            actual_secs: r.get(10)?,
+            completed: r.get::<_, i64>(11)? != 0,
         })
     })?;
     let out = rows.collect();
     out
 }
 
-/// (focused seconds, completed focus sessions) for days in range.
-pub fn totals(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<(i64, i64)> {
+/// (focused seconds, completed focus rounds) for days in range; `mode` filters focus/study.
+pub fn totals_mode(conn: &Connection, from: &str, to: &str, mode: Option<&str>) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
         "SELECT COALESCE(SUM(actual_secs), 0), COALESCE(SUM(completed), 0)
-         FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2",
-        params![from, to],
+         FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR mode = ?3)",
+        params![from, to, mode],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
+}
+
+pub fn totals(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<(i64, i64)> {
+    totals_mode(conn, from, to, None)
 }
 
 /// Consecutive days, ending today (or yesterday), with a completed focus session.
 pub fn streak(conn: &Connection, today: chrono::NaiveDate) -> rusqlite::Result<i64> {
     let mut count = 0;
     let mut day = today;
-    // Today without a session yet doesn't break the streak.
     let has = |d: chrono::NaiveDate| -> rusqlite::Result<bool> {
         conn.query_row(
             "SELECT 1 FROM focus_sessions WHERE kind = 'focus' AND completed = 1 AND day = ?1 LIMIT 1",
@@ -333,6 +486,7 @@ pub fn streak(conn: &Connection, today: chrono::NaiveDate) -> rusqlite::Result<i
         .optional()
         .map(|o| o.is_some())
     };
+    // Today without a session yet doesn't break the streak.
     if !has(day)? {
         day -= Duration::days(1);
     }
@@ -386,8 +540,16 @@ mod tests {
             break_mins: brk,
             long_break_mins: long,
             rounds,
-            block_distracting: true,
+            profile_id: None,
+            mode: "focus".into(),
+            subject: None,
+            goal_text: None,
+            goal_id: None,
         }
+    }
+
+    fn profile_id(conn: &Connection, name: &str) -> i64 {
+        conn.query_row("SELECT id FROM block_profiles WHERE name = ?1", params![name], |r| r.get(0)).unwrap()
     }
 
     #[test]
@@ -396,10 +558,11 @@ mod tests {
         assert_eq!(next_phase(&p, Phase::Focus, 1), Next::Break { round: 1, mins: 5 });
         assert_eq!(next_phase(&p, Phase::Break, 1), Next::Focus { round: 2 });
         assert_eq!(next_phase(&p, Phase::Focus, 4), Next::Done);
-        let p8 = plan(8, 5, 15);
-        assert_eq!(next_phase(&p8, Phase::Focus, 4), Next::Break { round: 4, mins: 15 });
+        assert_eq!(next_phase(&plan(8, 5, 15), Phase::Focus, 4), Next::Break { round: 4, mins: 15 });
         assert_eq!(next_phase(&plan(1, 0, 0), Phase::Focus, 1), Next::Done);
         assert_eq!(next_phase(&plan(3, 0, 0), Phase::Focus, 1), Next::Focus { round: 2 });
+        // 4 × 25 with 5-minute breaks: after round 1 there are 3 breaks and 3 rounds left.
+        assert_eq!(rest_of_plan_secs(&p, Phase::Focus, 1), (3 * 5 + 3 * 25) * 60);
     }
 
     #[test]
@@ -408,50 +571,77 @@ mod tests {
         assert!(FocusPlan { focus_mins: 0, ..plan(1, 0, 0) }.validate().is_err());
         assert!(FocusPlan { rounds: 0, ..plan(1, 0, 0) }.validate().is_err());
         assert!(FocusPlan { label: " ".into(), ..plan(1, 0, 0) }.validate().is_err());
+        assert!(FocusPlan { mode: "nap".into(), ..plan(1, 0, 0) }.validate().is_err());
     }
 
     #[test]
-    fn runs_rounds_and_blocks_only_during_focus() {
+    fn profile_blocks_whole_session_and_restores_access() {
         let conn = db::open_in_memory().unwrap();
         let shared = Shared::new(false, 300);
-        // A user who re-categorised YouTube as Education doesn't get it blocked.
-        let yt = db::get_or_create_website(&conn, "youtube.com", now()).unwrap();
-        conn.execute("UPDATE websites SET category_id = (SELECT id FROM categories WHERE name = 'Education') WHERE id = ?1", params![yt]).unwrap();
+        let t = now();
+        db::get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), t).unwrap();
+        let p = FocusPlan { focus_mins: 1, break_mins: 1, profile_id: Some(profile_id(&conn, "Study Mode")), ..plan(2, 1, 0) };
 
-        let st = start(&conn, &shared, FocusPlan { focus_mins: 1, break_mins: 1, ..plan(2, 1, 0) }).unwrap();
-        assert_eq!((st.phase, st.round), (Phase::Focus, 1));
-        let blocked = shared.focus_blocklist.lock().unwrap().clone();
-        assert!(blocked.contains(&"instagram.com".to_string()));
-        assert!(!blocked.contains(&"youtube.com".to_string()));
+        let st = start(&conn, &shared, p.clone()).unwrap();
+        assert!(st.blocking);
+        assert!(start(&conn, &shared, p).is_err(), "one session at a time");
+        assert!(shared.focus_blocklist.lock().unwrap().contains(&"youtube.com".to_string()));
+        assert!(shared.app_blocks.lock().unwrap().focus.contains_key("steam.exe"));
 
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
-        assert!(tick(&conn, &shared, t0 + Duration::seconds(30), true).unwrap().is_none());
         let n = tick(&conn, &shared, t0 + Duration::seconds(60), false).unwrap().unwrap();
         assert_eq!(n.0, "Round 1 of 2 done");
-        assert_eq!(status(&shared).unwrap().phase, Phase::Break);
-        assert!(shared.focus_blocklist.lock().unwrap().is_empty(), "no blocking during breaks");
+        assert!(shared.app_blocks.lock().unwrap().focus.contains_key("steam.exe"), "still blocked during the break");
 
         tick(&conn, &shared, t0 + Duration::seconds(120), false).unwrap().unwrap();
-        assert_eq!(status(&shared).unwrap().round, 2);
         let done = tick(&conn, &shared, t0 + Duration::seconds(180), false).unwrap().unwrap();
         assert_eq!(done.0, "Focus session complete");
+        assert!(done.1.contains("available again"));
         assert!(status(&shared).is_none());
+        assert!(shared.focus_blocklist.lock().unwrap().is_empty());
+        assert!(shared.app_blocks.lock().unwrap().focus.is_empty());
 
         let day = t0.format(db::DAY_FMT).to_string();
         assert_eq!(totals(&conn, &day, &day).unwrap(), (120, 2));
-        assert_eq!(history(&conn, 10).unwrap().len(), 2);
     }
 
     #[test]
-    fn stopping_early_is_not_completed() {
+    fn early_end_rules() {
         let conn = db::open_in_memory().unwrap();
         let shared = Shared::new(false, 300);
-        start(&conn, &shared, plan(1, 0, 0)).unwrap();
-        stop(&conn, &shared).unwrap();
+        // Study Mode = confirm with a phrase.
+        start(&conn, &shared, FocusPlan { profile_id: Some(profile_id(&conn, "Study Mode")), ..plan(1, 0, 0) }).unwrap();
+        assert!(stop(&conn, &shared, None).is_err());
+        assert!(stop(&conn, &shared, Some("nope")).is_err());
+        stop(&conn, &shared, Some(" i want to stop ")).unwrap();
         assert!(status(&shared).is_none());
-        let h = history(&conn, 10).unwrap();
+
+        // Deep Focus = strict: request, wait, then confirm.
+        start(&conn, &shared, FocusPlan { profile_id: Some(profile_id(&conn, "Deep Focus")), ..plan(1, 0, 0) }).unwrap();
+        assert!(shared.app_blocks.lock().unwrap().allow_only.is_some());
+        let a = shared.focus.lock().unwrap().clone().unwrap();
+        assert!(can_stop(&a, Some(STOP_PHRASE), a.start).is_err(), "must request first");
+        let requested = ActiveFocus { stop_requested: Some(a.start), ..a };
+        assert!(can_stop(&requested, Some(STOP_PHRASE), requested.start + Duration::seconds(30)).is_err());
+        assert!(can_stop(&requested, Some(STOP_PHRASE), requested.start + Duration::seconds(61)).is_ok());
+
+        let h = history(&conn, None, 10).unwrap();
         assert_eq!(h.len(), 1);
         assert!(!h[0].completed);
+    }
+
+    #[test]
+    fn study_sessions_are_counted_separately() {
+        let conn = db::open_in_memory().unwrap();
+        let shared = Shared::new(false, 300);
+        start(&conn, &shared, FocusPlan { mode: "study".into(), subject: Some("Maths".into()), focus_mins: 1, ..plan(1, 0, 0) }).unwrap();
+        let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
+        let n = tick(&conn, &shared, t0 + Duration::seconds(60), false).unwrap().unwrap();
+        assert_eq!(n.0, "Study session complete");
+        let day = t0.format(db::DAY_FMT).to_string();
+        assert_eq!(totals_mode(&conn, &day, &day, Some("study")).unwrap(), (60, 1));
+        assert_eq!(totals_mode(&conn, &day, &day, Some("focus")).unwrap(), (0, 0));
+        assert_eq!(history(&conn, Some("study"), 5).unwrap()[0].subject.as_deref(), Some("Maths"));
     }
 
     #[test]

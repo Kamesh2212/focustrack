@@ -240,6 +240,24 @@ fn walk_lnk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
 
 // --------------------------------------------------------------- discovery
 
+static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<InstalledApp>)>> = std::sync::Mutex::new(None);
+
+/// `scan()` cached for 10 minutes (it reads the Start Menu and registry).
+pub fn cached() -> Vec<InstalledApp> {
+    if let Ok(c) = CACHE.lock() {
+        if let Some((at, apps)) = c.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(600) {
+                return apps.clone();
+            }
+        }
+    }
+    let apps = scan();
+    if let Ok(mut c) = CACHE.lock() {
+        *c = Some((std::time::Instant::now(), apps.clone()));
+    }
+    apps
+}
+
 pub fn scan() -> Vec<InstalledApp> {
     let mut map: HashMap<String, InstalledApp> = HashMap::new();
 

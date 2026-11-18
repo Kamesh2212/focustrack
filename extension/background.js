@@ -34,10 +34,11 @@ function matches(domain, list) {
 }
 
 async function blockState() {
-  const s = await chrome.storage.session.get(["blocked", "focusBlocked", "focusEndsAt"]);
+  const s = await chrome.storage.session.get(["blocked", "focusBlocked", "focusAllowOnly", "focusEndsAt"]);
   return {
     blocked: Array.isArray(s.blocked) ? s.blocked : [],
     focusBlocked: Array.isArray(s.focusBlocked) ? s.focusBlocked : [],
+    focusAllowOnly: Array.isArray(s.focusAllowOnly) ? s.focusAllowOnly : null,
     focusEndsAt: s.focusEndsAt ?? null,
   };
 }
@@ -49,6 +50,8 @@ async function enforce(tab, state) {
   let reason = null;
   if (matches(domain, state.blocked)) reason = "limit";
   else if (matches(domain, state.focusBlocked)) reason = "focus";
+  // "Allow only" sessions: any site not on the list is blocked.
+  else if (domain && state.focusAllowOnly && !matches(domain, state.focusAllowOnly)) reason = "focus";
   if (!reason) return;
   const q = new URLSearchParams({ d: domain, r: reason });
   if (reason === "focus" && state.focusEndsAt) q.set("until", state.focusEndsAt);
@@ -85,9 +88,11 @@ async function beat() {
       const state = {
         blocked: Array.isArray(data.blocked) ? data.blocked : [],
         focusBlocked: Array.isArray(data.focusBlocked) ? data.focusBlocked : [],
+        focusAllowOnly: Array.isArray(data.focusAllowOnly) ? data.focusAllowOnly : null,
         focusEndsAt: data.focusEndsAt ?? null,
       };
-      const wasFocus = (await blockState()).focusBlocked.length > 0;
+      const before = await blockState();
+      const wasFocus = before.focusBlocked.length > 0 || before.focusAllowOnly !== null;
       await chrome.storage.session.set({
         connected: true,
         tracking: !!data.tracking,
@@ -97,7 +102,7 @@ async function beat() {
       });
       await enforce(s.tab, state);
       // A focus round just started: close the door on distracting tabs that are already open.
-      if (!wasFocus && state.focusBlocked.length) {
+      if (!wasFocus && (state.focusBlocked.length || state.focusAllowOnly)) {
         for (const tab of await chrome.tabs.query({})) await enforce(tab, state);
       }
     } catch {

@@ -1,4 +1,4 @@
-import { fetchSummary, fmt, fmtClock, renderLimits, renderSites } from "./usage.js";
+import { WIDGETS, el, fetchSummary, loadLayout } from "./usage.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,36 +18,41 @@ async function renderStatus() {
   $("current").textContent = s.current || "—";
 }
 
-function renderFocus(focus) {
-  const box = $("focus");
-  if (!focus) {
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const end = new Date(focus.endsAt.replace(" ", "T")).getTime();
-  const tick = () => {
-    const left = (end - Date.now()) / 1000;
-    const what = focus.phase === "focus" ? `Focusing: ${focus.label}` : "Break";
-    const round = focus.rounds > 1 ? ` · round ${focus.round}/${focus.rounds}` : "";
-    box.textContent = `${what}${round} — ${fmtClock(left)} left`;
-  };
-  tick();
-  setInterval(tick, 1000);
-}
-
 async function renderUsage() {
+  const root = $("widgets");
   try {
     const s = await fetchSummary();
-    $("screen").textContent = fmt(s.screenSecs);
-    $("web").textContent = fmt(s.webSecs);
-    renderSites($("sites"), s.topSites, 5);
-    renderLimits($("limits"), s.limits);
-    renderFocus(s.focus);
+    // The popup shows the first two widgets you chose for the side panel.
+    const layout = (await loadLayout()).filter((x) => x.on && x.id !== "note").slice(0, 2);
+    root.replaceChildren();
+    for (const item of layout) {
+      const w = WIDGETS.find((x) => x.id === item.id);
+      root.append(el("section", { class: "widget" }, el("h2", {}, w.title), ...w.render(s, renderUsage)));
+    }
   } catch {
-    $("sites").textContent = "Start the FocusTrack app to see your usage.";
+    root.replaceChildren(el("p", { class: "muted" }, "Start the FocusTrack app to see your usage."));
   }
 }
+
+// Look the window up now: the side panel must open directly from the click.
+let windowId = null;
+chrome.windows.getCurrent().then((w) => (windowId = w.id));
+
+// Chrome/Edge/Brave: side panel API. Firefox: sidebar. Otherwise a small window.
+$("open-panel").addEventListener("click", async () => {
+  try {
+    if (chrome.sidePanel?.open && windowId != null) {
+      await chrome.sidePanel.open({ windowId });
+    } else if (globalThis.browser?.sidebarAction?.open) {
+      await browser.sidebarAction.open();
+    } else {
+      throw new Error("no side panel");
+    }
+  } catch {
+    await chrome.windows.create({ url: chrome.runtime.getURL("sidepanel.html"), type: "popup", width: 380, height: 720 });
+  }
+  window.close();
+});
 
 renderStatus();
 renderUsage();

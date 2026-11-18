@@ -83,6 +83,22 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
           <Row title="Start with Windows" desc="Launches minimised to the tray when you sign in, so tracking is never missed.">
             <Toggle label="Start with Windows" checked={s.autostart} onChange={(on) => run(() => api.setAutostart(on))} />
           </Row>
+          <Row
+            title="Limit extensions per day"
+            desc='How many times a day you can press "+15 min" on a blocked limit. Set to none to make limits strict.'
+          >
+            <select
+              value={s.overridesPerDay}
+              onChange={(e) => run(() => api.setOverridesPerDay(Number(e.target.value)))}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+            >
+              {[0, 1, 2, 3, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n === 0 ? "None (strict)" : `${n} per day`}
+                </option>
+              ))}
+            </select>
+          </Row>
         </Card>
 
         <Card title="Notifications">
@@ -98,6 +114,20 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
               {BREAK_OPTIONS.map((m) => (
                 <option key={m} value={m}>
                   {m === 0 ? "Off" : m < 60 ? `${m} minutes` : `${m / 60} hour${m === 60 ? "" : "s"}`}
+                </option>
+              ))}
+            </select>
+          </Row>
+          <Row title="Goal reminder" desc="Once a day at this time, remind me about goals that aren't done yet.">
+            <select
+              value={s.goalReminder}
+              onChange={(e) => run(() => api.setGoalReminder(e.target.value))}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+            >
+              <option value="">Off</option>
+              {["17:00", "18:00", "19:00", "20:00", "21:00", "22:00"].map((t) => (
+                <option key={t} value={t}>
+                  {t}
                 </option>
               ))}
             </select>

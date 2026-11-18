@@ -42,17 +42,22 @@ export interface SiteUsage {
   sessions: number;
 }
 
+export type LimitAction = "notify" | "block" | "warn_then_block";
+
 export interface LimitStatus {
   id: number;
   targetType: "app" | "website";
   targetId: number;
   name: string;
+  key: string;
   color: string;
   dailyLimitSecs: number;
   warnPct: number;
-  block: boolean;
+  action: LimitAction;
   enabled: boolean;
   usedSecs: number;
+  extraSecs: number;
+  overridesUsed: number;
 }
 
 export interface BrowserStatus {
@@ -144,6 +149,9 @@ export interface Settings {
   notificationsEnabled: boolean;
   breakReminderMins: number;
   websiteTracking: boolean;
+  overridesPerDay: number;
+  goalReminder: string;
+  dashboardLayout: string;
 }
 
 export interface DayKinds {
@@ -165,25 +173,41 @@ export interface FocusPlan {
   breakMins: number;
   longBreakMins: number;
   rounds: number;
-  blockDistracting: boolean;
+  profileId: number | null;
+  mode: "focus" | "study";
+  subject: string | null;
+  goalText: string | null;
+  goalId: number | null;
 }
 
 export interface FocusStatus {
   label: string;
+  mode: "focus" | "study";
+  subject: string | null;
+  goalText: string | null;
   phase: "focus" | "break";
   round: number;
   rounds: number;
   startedAt: string;
   endsAt: string;
+  planEndsAt: string;
   remainingSecs: number;
   totalSecs: number;
-  blockDistracting: boolean;
+  profileName: string | null;
+  blocking: boolean;
+  preview: BlockPreview | null;
+  endEarly: EndEarly;
+  stopWaitSecs: number | null;
   plan: FocusPlan;
 }
 
 export interface FocusRecord {
   id: number;
   label: string;
+  mode: "focus" | "study";
+  subject: string | null;
+  goalText: string | null;
+  goalId: number | null;
   day: string;
   start: string;
   end: string | null;
@@ -200,9 +224,10 @@ export interface FocusOverview {
   weekSessions: number;
   streakDays: number;
   history: FocusRecord[];
+  stopPhrase: string;
 }
 
-export type GoalKind = "max_screen" | "min_category" | "max_category" | "min_focus_sessions";
+export type GoalKind = "max_screen" | "min_category" | "max_category" | "min_focus_sessions" | "custom";
 
 export interface GoalStatus {
   id: number;
@@ -211,6 +236,7 @@ export interface GoalStatus {
   category: string | null;
   color: string;
   target: number;
+  title: string | null;
   enabled: boolean;
   current: number;
   state: "achieved" | "in_progress" | "on_track" | "exceeded";
@@ -220,4 +246,56 @@ export interface GoalStatus {
 export interface Insight {
   tone: "good" | "warn" | "info";
   text: string;
+}
+
+export type EndEarly = "allow" | "confirm" | "strict";
+
+export interface Profile {
+  id: number | null;
+  name: string;
+  mode: "block" | "allow_only";
+  categories: string[];
+  apps: string[];
+  sites: string[];
+  unblockOnBreaks: boolean;
+  endEarly: EndEarly;
+  builtin: boolean;
+}
+
+export interface AppRef {
+  name: string;
+  exeName: string;
+  category: string;
+}
+
+export interface BlockPreview {
+  mode: "block" | "allow_only";
+  blockedApps: AppRef[];
+  blockedSites: string[];
+  allowedApps: AppRef[];
+  allowedSites: string[];
+}
+
+export interface Note {
+  id: number;
+  notebook: string;
+  title: string;
+  body: string;
+  focusSessionId: number | null;
+  sessionLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Notebook {
+  name: string;
+  count: number;
+  updatedAt: string;
+}
+
+export interface Resource {
+  id: number;
+  title: string;
+  url: string;
+  subject: string | null;
 }

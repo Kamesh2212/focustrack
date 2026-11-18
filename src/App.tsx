@@ -8,6 +8,8 @@ import {
   Settings as SettingsIcon,
   Target,
   Timer,
+  GraduationCap,
+  NotebookPen,
   type LucideIcon,
 } from "lucide-react";
 import { api, isTauri } from "./lib/api";
@@ -20,9 +22,11 @@ import History from "./pages/History";
 import Websites from "./pages/Websites";
 import Limits from "./pages/Limits";
 import Focus from "./pages/Focus";
+import Study from "./pages/Study";
+import Notes from "./pages/Notes";
 import Settings from "./pages/Settings";
 
-type PageId = "dashboard" | "applications" | "websites" | "reports" | "focus" | "limits" | "history" | "settings";
+type PageId = "dashboard" | "applications" | "websites" | "reports" | "focus" | "study" | "notes" | "limits" | "history" | "settings";
 
 const NAV: { id: PageId; label: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -30,6 +34,8 @@ const NAV: { id: PageId; label: string; icon: LucideIcon }[] = [
   { id: "websites", label: "Websites", icon: Globe },
   { id: "reports", label: "Reports", icon: BarChart3 },
   { id: "focus", label: "Focus Mode", icon: Timer },
+  { id: "study", label: "Study", icon: GraduationCap },
+  { id: "notes", label: "Notes", icon: NotebookPen },
   { id: "limits", label: "Usage Limits", icon: Target },
   { id: "history", label: "History", icon: HistoryIcon },
   { id: "settings", label: "Settings", icon: SettingsIcon },
@@ -70,6 +76,16 @@ export default function App() {
     window.history.replaceState(null, "", `#${id}`);
     document.querySelector("main")?.scrollTo({ top: 0 });
   };
+
+  // Dashboard widgets can open other pages.
+  useEffect(() => {
+    const onNav = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail as PageId;
+      if (NAV.some((n) => n.id === id)) go(id);
+    };
+    window.addEventListener("ft-navigate", onNav);
+    return () => window.removeEventListener("ft-navigate", onNav);
+  }, []);
 
   return (
     <div className="flex h-full">
@@ -115,6 +131,8 @@ export default function App() {
           {page === "websites" && <Websites />}
           {page === "limits" && <Limits />}
           {page === "focus" && <Focus />}
+          {page === "study" && <Study />}
+          {page === "notes" && <Notes />}
         </div>
       </main>
     </div>

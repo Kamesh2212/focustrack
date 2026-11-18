@@ -6,6 +6,7 @@
 pub const DEFAULT_CATEGORIES: &[(&str, &str, &str)] = &[
     ("Productivity", "#6366f1", "productive"),
     ("Education", "#0ea5e9", "productive"),
+    ("Study", "#14b8a6", "productive"),
     ("Development", "#10b981", "productive"),
     ("Communication", "#f59e0b", "neutral"),
     ("Entertainment", "#ef4444", "distracting"),
@@ -30,7 +31,7 @@ pub fn default_category_for(exe_lower: &str) -> &'static str {
             "Productivity"
         }
 
-        "anki" | "zotero" | "mendeley" | "kindle" | "duolingo" => "Education",
+        "anki" | "zotero" | "mendeley" | "kindle" | "duolingo" | "goodnotes" | "xodo" | "calibre" => "Study",
 
         "discord" | "slack" | "teams" | "ms-teams" | "outlook" | "olk" | "zoom" | "skype"
         | "whatsapp" | "telegram" | "signal" | "thunderbird" | "mailspring" => "Communication",
@@ -110,15 +111,23 @@ pub const DOMAIN_MAP: &[(&str, &str)] = &[
     ("meet.google.com", "Communication"),
     ("zoom.us", "Communication"),
     ("wikipedia.org", "Education"),
-    ("coursera.org", "Education"),
-    ("udemy.com", "Education"),
-    ("edx.org", "Education"),
-    ("khanacademy.org", "Education"),
-    ("duolingo.com", "Education"),
-    ("leetcode.com", "Education"),
+    ("coursera.org", "Study"),
+    ("udemy.com", "Study"),
+    ("edx.org", "Study"),
+    ("khanacademy.org", "Study"),
+    ("duolingo.com", "Study"),
+    ("leetcode.com", "Study"),
+    ("quizlet.com", "Study"),
+    ("brilliant.org", "Study"),
+    ("ankiweb.net", "Study"),
+    ("notebooklm.google.com", "Study"),
+    ("classroom.google.com", "Study"),
+    ("arxiv.org", "Study"),
+    ("jstor.org", "Study"),
+    ("researchgate.net", "Study"),
     ("geeksforgeeks.org", "Education"),
     ("w3schools.com", "Education"),
-    ("scholar.google.com", "Education"),
+    ("scholar.google.com", "Study"),
     ("store.steampowered.com", "Gaming"),
     ("steamcommunity.com", "Gaming"),
     ("epicgames.com", "Gaming"),
@@ -143,8 +152,11 @@ pub fn default_category_for_domain(domain: &str) -> &'static str {
     }
 }
 
-/// Default categories counted as distracting (blocked during focus sessions).
-pub const DISTRACTING: &[&str] = &["Entertainment", "Social Media", "Gaming"];
+/// Exe stems and domains that moved from Education to Study in schema v4.
+pub const STUDY_EXES: &[&str] = &["anki.exe", "zotero.exe", "mendeley.exe", "kindle.exe", "duolingo.exe"];
+pub const STUDY_DOMAINS: &[&str] = &[
+    "coursera.org", "udemy.com", "edx.org", "khanacademy.org", "duolingo.com", "leetcode.com", "scholar.google.com",
+];
 
 /// Browser family for a foreground executable, matching what the extension
 /// reports (`chrome`, `edge`, `brave`, `firefox`, `opera`, `vivaldi`).

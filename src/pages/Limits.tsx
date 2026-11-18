@@ -3,7 +3,7 @@ import { AppWindow, Globe, Pencil, Plus, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import { addDays, fmtDuration, today } from "../lib/format";
-import type { LimitStatus } from "../lib/types";
+import type { LimitAction, LimitStatus } from "../lib/types";
 import { AppBadge, Button, Card, Empty, ErrorNote, PageHeader, Segmented, Toggle, cx } from "../components/ui";
 
 type TargetType = "app" | "website";
@@ -14,14 +14,20 @@ interface Draft {
   hours: number;
   minutes: number;
   warnPct: number;
-  block: boolean;
+  action: LimitAction;
   enabled: boolean;
 }
+
+const ACTIONS: { value: LimitAction; label: string; short: string; appDesc: string; siteDesc: string }[] = [
+  { value: "notify", label: "Notify only", short: "notifies", appDesc: "Warn me at the warning level and when I reach the limit.", siteDesc: "Warn me at the warning level and when I reach the limit." },
+  { value: "warn_then_block", label: "Warn, then block", short: "warns, then blocks", appDesc: "Warn me first; at the limit, give me 1 minute to save, then close the app for the rest of the day.", siteDesc: "Warn me first; at the limit, give me 1 minute, then block the site in my browser." },
+  { value: "block", label: "Block at the limit", short: "blocks", appDesc: "Close the app as soon as the limit is reached and keep it closed today.", siteDesc: "Block the site as soon as the limit is reached." },
+];
 
 const PRESETS = [15, 30, 60, 90, 120, 180];
 
 function emptyDraft(targetType: TargetType = "website"): Draft {
-  return { targetType, targetId: null, hours: 1, minutes: 0, warnPct: 80, block: false, enabled: true };
+  return { targetType, targetId: null, hours: 1, minutes: 0, warnPct: 80, action: "warn_then_block", enabled: true };
 }
 
 function LimitEditor({
@@ -74,7 +80,7 @@ function LimitEditor({
         targetId,
         dailyLimitSecs: limitSecs,
         warnPct: d.warnPct,
-        block: d.targetType === "website" && d.block,
+        action: d.action,
         enabled: d.enabled,
       });
       onDone();
@@ -94,7 +100,7 @@ function LimitEditor({
             <Segmented<TargetType>
               value={d.targetType}
               onChange={(t) => {
-                setD({ ...d, targetType: t, targetId: null, block: false });
+                setD({ ...d, targetType: t, targetId: null });
                 setPick("");
               }}
               options={[
@@ -201,12 +207,20 @@ function LimitEditor({
               ))}
             </select>
           </label>
-          {d.targetType === "website" && (
-            <label className="flex items-center gap-3 text-sm">
-              <Toggle label="Block when limit is reached" checked={d.block} onChange={(v) => setD({ ...d, block: v })} />
-              Block the site in my browser when the limit is reached
-            </label>
-          )}
+          <fieldset className="text-sm">
+            <legend className="mb-1.5 text-slate-500">When the limit is reached</legend>
+            <div className="space-y-1.5">
+              {ACTIONS.map((a) => (
+                <label key={a.value} className="flex cursor-pointer items-start gap-2">
+                  <input type="radio" name="limit-action" checked={d.action === a.value} onChange={() => setD({ ...d, action: a.value })} className="mt-1" />
+                  <span>
+                    <span className="font-medium">{a.label}</span>
+                    <span className="block text-xs text-slate-500">{d.targetType === "app" ? a.appDesc : a.siteDesc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
         </div>
       </div>
       <div className="mt-5 flex gap-2">
@@ -219,9 +233,10 @@ function LimitEditor({
   );
 }
 
-function LimitRow({ l, onEdit, onChange }: { l: LimitStatus; onEdit: () => void; onChange: () => void }) {
-  const pct = Math.min(100, (l.usedSecs / l.dailyLimitSecs) * 100);
-  const over = l.usedSecs >= l.dailyLimitSecs;
+function LimitRow({ l, onEdit, onChange, onError }: { l: LimitStatus; onEdit: () => void; onChange: () => void; onError: (e: string) => void }) {
+  const allowed = l.dailyLimitSecs + l.extraSecs;
+  const pct = Math.min(100, (l.usedSecs / allowed) * 100);
+  const over = l.usedSecs >= allowed;
   const warn = !over && pct >= l.warnPct;
   const Icon = l.targetType === "app" ? AppWindow : Globe;
   return (
@@ -231,9 +246,12 @@ function LimitRow({ l, onEdit, onChange }: { l: LimitStatus; onEdit: () => void;
         <div className="flex items-center gap-2">
           <span className="font-medium">{l.name}</span>
           <Icon size={13} className="text-slate-400" />
-          {l.block && (
-            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-              blocks when reached
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {ACTIONS.find((a) => a.value === l.action)?.short}
+          </span>
+          {l.extraSecs > 0 && (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+              +{fmtDuration(l.extraSecs)} today
             </span>
           )}
         </div>
@@ -245,14 +263,29 @@ function LimitRow({ l, onEdit, onChange }: { l: LimitStatus; onEdit: () => void;
         </div>
         <div className="tabular mt-1.5 flex justify-between text-xs text-slate-500">
           <span>
-            {fmtDuration(l.usedSecs)} of {fmtDuration(l.dailyLimitSecs)} today
+            {fmtDuration(l.usedSecs)} of {fmtDuration(allowed)} today
           </span>
           <span className={cx(over && "font-medium text-rose-600 dark:text-rose-400", warn && "text-amber-600 dark:text-amber-400")}>
-            {over ? (l.block ? "Limit reached · blocked" : "Limit reached") : `${fmtDuration(l.dailyLimitSecs - l.usedSecs)} left`}
+            {over ? (l.action === "notify" ? "Limit reached" : "Limit reached · blocked") : `${fmtDuration(allowed - l.usedSecs)} left`}
           </span>
         </div>
       </div>
       <div className="flex items-center gap-1">
+        {over && l.action !== "notify" && l.enabled && (
+          <Button
+            onClick={async () => {
+              try {
+                await api.overrideLimit(l.id);
+                onChange();
+              } catch (e) {
+                onError(String(e));
+              }
+            }}
+            title="Unblock for 15 more minutes today"
+          >
+            +15 min
+          </Button>
+        )}
         <Toggle
           label={`Limit for ${l.name} enabled`}
           checked={l.enabled}
@@ -281,6 +314,7 @@ function LimitRow({ l, onEdit, onChange }: { l: LimitStatus; onEdit: () => void;
 
 export default function Limits() {
   const { data, error, reload } = useLoad(() => api.limits(), [], 15000);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ draft: Draft; key: number } | null>(null);
   const limits = data ?? [];
 
@@ -294,7 +328,7 @@ export default function Limits() {
         hours: Math.floor(l.dailyLimitSecs / 3600),
         minutes: Math.round((l.dailyLimitSecs % 3600) / 60),
         warnPct: l.warnPct,
-        block: l.block,
+        action: l.action,
         enabled: l.enabled,
       },
     });
@@ -303,7 +337,7 @@ export default function Limits() {
     <>
       <PageHeader
         title="Usage Limits"
-        subtitle="Daily limits reset at midnight. You'll get a Windows notification at the warning level and when a limit is reached."
+        subtitle="Daily limits reset at midnight. Choose whether each limit just notifies you or actually blocks the app or website."
         actions={
           !editor && (
             <Button variant="primary" onClick={openNew}>
@@ -312,7 +346,7 @@ export default function Limits() {
           )
         }
       />
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? actionError} />
       {editor && (
         <LimitEditor
           key={editor.key}
@@ -331,13 +365,15 @@ export default function Limits() {
         ) : (
           <ul className="divide-y divide-slate-100 dark:divide-slate-800/60">
             {limits.map((l) => (
-              <LimitRow key={l.id} l={l} onEdit={() => openEdit(l)} onChange={reload} />
+              <LimitRow key={l.id} l={l} onEdit={() => openEdit(l)} onChange={() => { setActionError(null); reload(); }} onError={setActionError} />
             ))}
           </ul>
         )}
       </Card>
       <p className="mt-3 text-xs text-slate-500">
-        Website blocking is done by the FocusTrack browser extension. Application limits notify you but don't close the app.
+        Blocked apps are asked to close first (so you can save), then closed if they're still open; they're closed again if reopened. Websites are
+        blocked by the FocusTrack browser extension. Windows tools, File Explorer and Task Manager are never blocked. How many "+15 min" extensions you
+        get per day is set in Settings.
       </p>
     </>
   );
