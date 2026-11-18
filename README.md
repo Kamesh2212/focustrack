@@ -64,6 +64,13 @@ npm run app:build    # build installers (NSIS + MSI) into src-tauri/target/relea
 cd src-tauri && cargo test   # tracker / storage / analytics tests
 ```
 
+If the build fails with `LNK1104: cannot open file ...build_script_build.exe`, the project path is too long
+for the MSVC linker (260-character limit). Point Cargo at a short build directory:
+
+```bash
+export CARGO_TARGET_DIR="C:/Users/$USERNAME/.focustrack-target"
+```
+
 UI only, without Rust (uses sample data):
 
 ```bash
