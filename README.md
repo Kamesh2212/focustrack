@@ -3,8 +3,9 @@
 Windows screen time & digital wellbeing app — like Screen Time / Digital Wellbeing, for your laptop.
 Built with **Tauri 2 + React + TypeScript + Rust + SQLite** per the [requirements spec](docs/SRS.md).
 
-All data stays on your PC. FocusTrack records which app is in the foreground and when, plus idle time.
-It never records keystrokes, window contents, screenshots or passwords.
+All data stays on your PC. FocusTrack records which app is in the foreground and when, idle time, and
+(with the browser extension) the domain of the active tab. It never records keystrokes, window contents,
+screenshots, passwords, full URLs or page content.
 
 ## Status
 
@@ -12,7 +13,7 @@ It never records keystrokes, window contents, screenshots or passwords.
 |---|---|---|
 | 1 · Core tracking | Foreground app detection, idle/lock/sleep detection, session recording, SQLite, start with Windows, tray | **Implemented** |
 | 2 · Dashboard & analytics | Dashboard, app breakdown & categories, daily/weekly reports, charts, heatmap, history, CSV export, settings | **Implemented** |
-| 3 · Advanced tracking | Browser extensions, website tracking, app/website limits, notifications | Planned (placeholder screens) |
+| 3 · Advanced tracking | Browser extension, website tracking & categories, app/website daily limits, website blocking, Windows notifications, break reminders | **Implemented** |
 | 4 · Productivity | Focus mode / Pomodoro, goals, insights | Planned (placeholder screen) |
 | 5 · Advanced | AI insights, streaks, sync | Planned |
 
@@ -28,21 +29,48 @@ It never records keystrokes, window contents, screenshots or passwords.
 
 Screen time = active + idle. Locked, asleep and paused time is excluded.
 
+## Website tracking
+
+The extension in [`extension/`](extension) (Manifest V3; Chrome, Edge, Brave, Opera, Vivaldi, Firefox 121+)
+sends the active tab's **domain only** to `http://127.0.0.1:17865/v1/heartbeat` when the tab or window focus
+changes and every 30 s. Private/incognito tabs are never reported. The desktop app counts website time only
+while that browser is the foreground app and you're not idle, so it's always a subset of the browser's app time.
+
+The local API (`src-tauri/src/browser.rs`) listens on 127.0.0.1 only and rejects requests from web pages
+(non-extension `Origin`, missing `X-FocusTrack` header, or a foreign `Host`).
+
+**Install the extension (development):**
+
+- Chrome / Edge / Brave: open `chrome://extensions` (`edge://`, `brave://`), enable **Developer mode**,
+  click **Load unpacked**, select the `extension` folder.
+- Firefox: `about:debugging` → This Firefox → **Load Temporary Add-on** → `extension/manifest.json`
+  (temporary until Firefox restarts; a signed build is needed for permanent install).
+
+## Limits and notifications
+
+`src-tauri/src/limits.rs` checks every 15 s. Each enabled limit notifies once per day at its warning level
+(default 80%) and once when reached. Website limits can also **block** the site: the extension redirects it
+to a "blocked for today" page until midnight. App limits notify but don't close the app. An optional break
+reminder fires after N minutes of continuous use (a 5-minute gap resets it).
+
 ## Project layout
 
 ```
 src/                     React UI
-  pages/                 Dashboard, Applications, Reports, History, Settings, …
+  pages/                 Dashboard, Applications, Websites, Reports, Usage Limits, History, Settings
   components/            UI kit + Recharts charts
   lib/api.ts             Typed wrappers over Tauri commands (falls back to sample data in a browser)
 src-tauri/src/
-  tracker.rs             Background tracking engine (+ tests with a fake OS probe)
+  tracker.rs             Background tracking engine: apps, websites, idle (+ tests with a fake OS probe)
+  browser.rs             Local HTTP API for the browser extension
+  limits.rs              Daily limits, blocklist, notifications, break reminders
   platform.rs            Win32 calls (windows-sys)
   db.rs                  SQLite schema, migrations, writes
   analytics.rs           Aggregations: totals, per-day, per-app, hourly, heatmap, sessions
   commands.rs            Tauri commands used by the UI
   categories.rs          Built-in categories and exe → category defaults
   lib.rs                 App setup, tray menu, autostart, single instance
+extension/               Browser extension (MV3)
 docs/SRS.md              Requirements
 ```
 

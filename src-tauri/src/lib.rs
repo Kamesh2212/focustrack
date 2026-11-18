@@ -1,9 +1,11 @@
 //! FocusTrack desktop app: tray-resident screen time tracker.
 
 mod analytics;
+mod browser;
 mod categories;
 mod commands;
 mod db;
+mod limits;
 mod platform;
 mod tracker;
 
@@ -95,6 +97,7 @@ pub fn run() {
     tauri::Builder::default()
         // A second launch just focuses the running instance (no double tracking).
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -107,7 +110,12 @@ pub fn run() {
             let conn = db::open(&db_path)?;
             let settings = db::load_settings(&conn)?;
             let shared = Arc::new(tracker::Shared::new(settings.paused, settings.idle_threshold_secs));
-            tracker::spawn(db_path, shared.clone());
+            shared.website_tracking.store(settings.website_tracking, Ordering::SeqCst);
+            shared.notifications_enabled.store(settings.notifications_enabled, Ordering::SeqCst);
+            shared.break_reminder_mins.store(settings.break_reminder_mins, Ordering::SeqCst);
+            tracker::spawn(db_path.clone(), shared.clone());
+            browser::spawn_server(shared.clone());
+            limits::spawn(app.handle().clone(), db_path, shared.clone());
 
             app.manage(AppState { db: Mutex::new(conn), shared, data_dir });
             build_tray(app, settings.paused)?;
@@ -142,6 +150,16 @@ pub fn run() {
             commands::set_theme,
             commands::delete_all_data,
             commands::delete_data_older_than,
+            commands::set_notifications_enabled,
+            commands::set_break_reminder,
+            commands::set_website_tracking,
+            commands::send_test_notification,
+            commands::get_websites,
+            commands::set_website_category,
+            commands::get_browser_status,
+            commands::get_limits,
+            commands::set_limit,
+            commands::delete_limit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

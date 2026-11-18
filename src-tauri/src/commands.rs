@@ -1,6 +1,8 @@
 //! Tauri commands invoked by the React frontend.
 
-use crate::analytics::{self as an, AppUsage, CategoryUsage, DayTotal};
+use crate::analytics::{self as an, AppUsage, CategoryUsage, DayTotal, SiteUsage};
+use crate::browser;
+use crate::limits::{self, LimitStatus};
 use crate::db;
 use crate::tracker::LiveStatus;
 use crate::{AppState, TrayPause};
@@ -41,6 +43,8 @@ pub struct Dashboard {
     pub productive_secs: i64,
     pub distracting_secs: i64,
     pub top_apps: Vec<AppUsage>,
+    pub top_sites: Vec<SiteUsage>,
+    pub site_secs: i64,
     pub categories: Vec<CategoryUsage>,
     pub week: Vec<DayTotal>,
     pub hourly: Vec<i64>,
@@ -59,6 +63,8 @@ pub fn get_dashboard(state: State<'_, AppState>) -> CmdResult<Dashboard> {
     let week = an::daily_totals(&conn, today - Duration::days(6), today).map_err(err)?;
     let month = an::daily_totals(&conn, today - Duration::days(29), today).map_err(err)?;
     let apps = an::app_usage(&conn, &t, &t).map_err(err)?;
+    let sites = an::site_usage(&conn, &t, &t).map_err(err)?;
+    let site_secs = an::site_total(&conn, &t, &t).map_err(err)?;
     let categories = an::category_usage(&conn, &t, &t).map_err(err)?;
     let spans = an::active_spans(&conn, &t, &t).map_err(err)?;
     let (hours, _) = an::hour_buckets(&spans);
@@ -76,6 +82,8 @@ pub fn get_dashboard(state: State<'_, AppState>) -> CmdResult<Dashboard> {
         productive_secs: productive,
         distracting_secs: distracting,
         top_apps: apps.into_iter().filter(|a| a.secs > 0).take(8).collect(),
+        top_sites: sites.into_iter().filter(|s| s.secs > 0).take(8).collect(),
+        site_secs,
         categories,
         week,
         hourly: hours.to_vec(),
@@ -163,6 +171,8 @@ pub struct Report {
     pub peak_hour: Option<usize>,
     pub days: Vec<DayTotal>,
     pub apps: Vec<AppUsage>,
+    pub sites: Vec<SiteUsage>,
+    pub site_secs: i64,
     pub categories: Vec<CategoryUsage>,
     pub hourly: Vec<i64>,
     /// 7 rows (Mon..Sun) x 24 hours, active seconds.
@@ -183,6 +193,8 @@ pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdRe
     let (prev_active, _) = an::totals(&conn, &an::fmt_day(pf), &an::fmt_day(pt)).map_err(err)?;
     let days = an::daily_totals(&conn, f, t).map_err(err)?;
     let apps = an::app_usage(&conn, &from, &to).map_err(err)?;
+    let sites = an::site_usage(&conn, &from, &to).map_err(err)?;
+    let site_secs = an::site_total(&conn, &from, &to).map_err(err)?;
     let categories = an::category_usage(&conn, &from, &to).map_err(err)?;
     let spans = an::active_spans(&conn, &from, &to).map_err(err)?;
     let (hours, heat) = an::hour_buckets(&spans);
@@ -216,6 +228,8 @@ pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdRe
         peak_hour,
         days,
         apps: apps.into_iter().filter(|a| a.secs > 0).take(25).collect(),
+        sites: sites.into_iter().filter(|s| s.secs > 0).take(25).collect(),
+        site_secs,
         categories,
         hourly: hours.to_vec(),
         heatmap: heat.iter().map(|r| r.to_vec()).collect(),
@@ -238,6 +252,17 @@ pub struct SessionRow {
     pub secs: i64,
 }
 
+const SITE_HISTORY_SQL: &str = "
+    SELECT s.id, w.domain, s.browser, COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'),
+           s.day, s.start_time, s.end_time, s.duration_secs
+    FROM website_sessions s
+    JOIN websites w ON w.id = s.website_id
+    LEFT JOIN categories c ON c.id = w.category_id
+    WHERE s.day BETWEEN ?1 AND ?2 AND s.duration_secs > 0
+      AND (?3 = '' OR w.domain LIKE '%' || ?3 || '%' OR c.name LIKE '%' || ?3 || '%')
+    ORDER BY s.start_time DESC
+    LIMIT ?4";
+
 const HISTORY_SQL: &str = "
     SELECT s.id, a.display_name, a.exe_name, COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'),
            s.day, s.start_time, s.end_time, s.duration_secs
@@ -252,12 +277,13 @@ const HISTORY_SQL: &str = "
 
 fn query_history(
     conn: &rusqlite::Connection,
+    websites: bool,
     from: &str,
     to: &str,
     search: &str,
     limit: i64,
 ) -> rusqlite::Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare(HISTORY_SQL)?;
+    let mut stmt = conn.prepare(if websites { SITE_HISTORY_SQL } else { HISTORY_SQL })?;
     let rows = stmt.query_map(params![from, to, search.trim(), limit], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
@@ -282,11 +308,13 @@ pub fn get_history(
     to: String,
     search: Option<String>,
     limit: Option<i64>,
+    kind: Option<String>,
 ) -> CmdResult<Vec<SessionRow>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
-    query_history(&conn, &from, &to, search.as_deref().unwrap_or(""), limit.unwrap_or(500).clamp(1, 5000))
+    let websites = kind.as_deref() == Some("websites");
+    query_history(&conn, websites, &from, &to, search.as_deref().unwrap_or(""), limit.unwrap_or(500).clamp(1, 5000))
         .map_err(err)
 }
 
@@ -298,7 +326,7 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-/// Writes a CSV of app sessions to the Downloads folder; returns its path.
+/// Writes a CSV of app or website sessions to the Downloads folder; returns its path.
 #[tauri::command]
 pub fn export_csv(
     app: AppHandle,
@@ -306,14 +334,20 @@ pub fn export_csv(
     from: String,
     to: String,
     search: Option<String>,
+    kind: Option<String>,
 ) -> CmdResult<String> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
+    let websites = kind.as_deref() == Some("websites");
     let rows = {
         let conn = conn!(state);
-        query_history(&conn, &from, &to, search.as_deref().unwrap_or(""), i64::MAX).map_err(err)?
+        query_history(&conn, websites, &from, &to, search.as_deref().unwrap_or(""), i64::MAX).map_err(err)?
     };
-    let mut out = String::from("application,executable,category,date,start,end,duration_seconds,duration_minutes\n");
+    let mut out = String::from(if websites {
+        "website,browser,category,date,start,end,duration_seconds,duration_minutes\n"
+    } else {
+        "application,executable,category,date,start,end,duration_seconds,duration_minutes\n"
+    });
     for r in rows.iter().rev() {
         out.push_str(&format!(
             "{},{},{},{},{},{},{},{:.1}\n",
@@ -332,7 +366,8 @@ pub fn export_csv(
         .download_dir()
         .or_else(|_| app.path().document_dir())
         .map_err(err)?;
-    let path = dir.join(format!("focustrack-{from}-to-{to}.csv"));
+    let label = if websites { "websites" } else { "apps" };
+    let path = dir.join(format!("focustrack-{label}-{from}-to-{to}.csv"));
     std::fs::write(&path, out).map_err(err)?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -347,6 +382,9 @@ pub struct Settings {
     pub autostart: bool,
     pub theme: String,
     pub data_dir: String,
+    pub notifications_enabled: bool,
+    pub break_reminder_mins: u64,
+    pub website_tracking: bool,
 }
 
 #[tauri::command]
@@ -359,6 +397,9 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Set
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         theme: s.theme,
         data_dir: state.data_dir.to_string_lossy().into_owned(),
+        notifications_enabled: s.notifications_enabled,
+        break_reminder_mins: s.break_reminder_mins,
+        website_tracking: s.website_tracking,
     })
 }
 
@@ -424,4 +465,151 @@ pub fn delete_data_older_than(state: State<'_, AppState>, days: i64) -> CmdResul
     let cutoff = an::fmt_day(Local::now().date_naive() - Duration::days(days));
     let conn = conn!(state);
     db::delete_usage_before(&conn, &cutoff).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    state.shared.notifications_enabled.store(enabled, Ordering::SeqCst);
+    let conn = conn!(state);
+    db::set_setting(&conn, "notifications_enabled", if enabled { "1" } else { "0" }).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_break_reminder(state: State<'_, AppState>, mins: u64) -> CmdResult<()> {
+    if mins > 8 * 60 {
+        return Err("Break reminder must be at most 8 hours".into());
+    }
+    state.shared.break_reminder_mins.store(mins, Ordering::SeqCst);
+    let conn = conn!(state);
+    db::set_setting(&conn, "break_reminder_mins", &mins.to_string()).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_website_tracking(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    state.shared.website_tracking.store(enabled, Ordering::SeqCst);
+    let conn = conn!(state);
+    db::set_setting(&conn, "website_tracking", if enabled { "1" } else { "0" }).map_err(err)
+}
+
+#[tauri::command]
+pub fn send_test_notification(app: AppHandle) {
+    limits::notify(&app, "FocusTrack notifications are on", "This is how limit warnings and break reminders will look.");
+}
+
+// -------------------------------------------------------------- websites
+
+#[tauri::command]
+pub fn get_websites(state: State<'_, AppState>, from: String, to: String) -> CmdResult<Vec<SiteUsage>> {
+    an::parse_day(&from)?;
+    an::parse_day(&to)?;
+    let conn = conn!(state);
+    an::site_usage(&conn, &from, &to).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_website_category(state: State<'_, AppState>, website_id: i64, category_id: Option<i64>) -> CmdResult<()> {
+    let conn = conn!(state);
+    conn.execute(
+        "UPDATE websites SET category_id = ?1 WHERE id = ?2",
+        params![category_id, website_id],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserConn {
+    pub browser: String,
+    pub last_seen_secs: i64,
+    pub connected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserStatus {
+    pub server_running: bool,
+    pub port: u16,
+    pub browsers: Vec<BrowserConn>,
+}
+
+#[tauri::command]
+pub fn get_browser_status(state: State<'_, AppState>) -> BrowserStatus {
+    let now = Local::now().naive_local();
+    let mut browsers: Vec<BrowserConn> = state
+        .shared
+        .browsers
+        .lock()
+        .map(|m| {
+            m.iter()
+                .map(|(b, r)| {
+                    let age = (now - r.at).num_seconds().max(0);
+                    BrowserConn { browser: b.clone(), last_seen_secs: age, connected: age <= browser::FRESH_SECS }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    browsers.sort_by_key(|b| b.last_seen_secs);
+    BrowserStatus {
+        server_running: state.shared.server_running.load(Ordering::SeqCst),
+        port: browser::PORT,
+        browsers,
+    }
+}
+
+// ---------------------------------------------------------------- limits
+
+#[tauri::command]
+pub fn get_limits(state: State<'_, AppState>) -> CmdResult<Vec<LimitStatus>> {
+    let conn = conn!(state);
+    let today = an::fmt_day(Local::now().date_naive());
+    limits::limit_status(&conn, &today).map_err(err)
+}
+
+/// Creates or updates the limit for an app or website.
+#[tauri::command]
+pub fn set_limit(
+    state: State<'_, AppState>,
+    target_type: String,
+    target_id: i64,
+    daily_limit_secs: i64,
+    warn_pct: i64,
+    block: bool,
+    enabled: bool,
+) -> CmdResult<()> {
+    if target_type != "app" && target_type != "website" {
+        return Err("target must be an app or a website".into());
+    }
+    if !(60..=24 * 3600).contains(&daily_limit_secs) {
+        return Err("Limit must be between 1 minute and 24 hours".into());
+    }
+    if !(10..=99).contains(&warn_pct) {
+        return Err("Warning must be between 10% and 99%".into());
+    }
+    let conn = conn!(state);
+    conn.execute(
+        "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(target_type, target_id) DO UPDATE SET
+           daily_limit_secs = excluded.daily_limit_secs, warn_pct = excluded.warn_pct,
+           block = excluded.block, enabled = excluded.enabled",
+        params![target_type, target_id, daily_limit_secs, warn_pct, block && target_type == "website", enabled],
+    )
+    .map_err(err)?;
+    let id: i64 = conn
+        .query_row(
+            "SELECT id FROM usage_limits WHERE target_type = ?1 AND target_id = ?2",
+            params![target_type, target_id],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    // A changed limit may need to warn again today.
+    db::clear_limit_notifications(&conn, id).map_err(err)
+}
+
+#[tauri::command]
+pub fn delete_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let conn = conn!(state);
+    conn.execute("DELETE FROM usage_limits WHERE id = ?1", params![id]).map_err(err)?;
+    db::clear_limit_notifications(&conn, id).map_err(err)
 }

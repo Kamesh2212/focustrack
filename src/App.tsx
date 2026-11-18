@@ -17,6 +17,8 @@ import Dashboard from "./pages/Dashboard";
 import Applications from "./pages/Applications";
 import Reports from "./pages/Reports";
 import History from "./pages/History";
+import Websites from "./pages/Websites";
+import Limits from "./pages/Limits";
 import Settings from "./pages/Settings";
 import ComingSoon from "./pages/ComingSoon";
 
@@ -110,20 +112,8 @@ export default function App() {
           {page === "reports" && <Reports />}
           {page === "history" && <History />}
           {page === "settings" && <Settings onThemeChange={setTheme} />}
-          {page === "websites" && (
-            <ComingSoon
-              title="Websites"
-              phase="Phase 3 · Advanced tracking"
-              icon={Globe}
-              summary="Browser extensions for Chrome, Edge and Firefox will report the active tab's domain (never page content) to FocusTrack."
-              features={[
-                "Time per website domain",
-                "Most-used websites on the dashboard",
-                "Website categories and manual re-categorisation",
-                "Website usage trends and history",
-              ]}
-            />
-          )}
+          {page === "websites" && <Websites />}
+          {page === "limits" && <Limits />}
           {page === "focus" && (
             <ComingSoon
               title="Focus Mode"
@@ -137,21 +127,6 @@ export default function App() {
                 "Custom durations and breaks",
                 "Focus session history and totals",
                 "Session-complete notifications",
-              ]}
-            />
-          )}
-          {page === "limits" && (
-            <ComingSoon
-              title="Usage Limits"
-              phase="Phase 3 · Advanced tracking"
-              icon={Target}
-              summary="Daily limits for apps and websites, with Windows notifications as you approach and pass them."
-              features={[
-                "Daily limits per application",
-                "Daily limits per website",
-                "Remaining-time display",
-                "Configurable warning threshold (e.g. 80%)",
-                "Optional blocking after the limit",
               ]}
             />
           )}

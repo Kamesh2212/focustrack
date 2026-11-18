@@ -5,6 +5,7 @@ import { dayLabel, fmtDuration, pctChange, rangeFor, today, type RangeKey } from
 import { Card, DateInput, ErrorNote, PageHeader, RangePicker, Stat } from "../components/ui";
 import { CategoryDonut, DailyChart, Heatmap, HourlyChart } from "../components/charts";
 import { AppList } from "../components/AppList";
+import { SiteList } from "../components/SiteList";
 
 export default function Reports() {
   const [range, setRange] = useState<RangeKey>("7d");
@@ -71,6 +72,12 @@ export default function Reports() {
               <AppList apps={r.apps} limit={10} empty="No application usage in this period." />
             </Card>
             <div className="grid content-start gap-4">
+              <Card
+                title="Websites"
+                action={r.siteSecs > 0 && <span className="tabular text-xs text-slate-500">{fmtDuration(r.siteSecs)} total</span>}
+              >
+                <SiteList sites={r.sites} limit={8} empty="No website usage in this period." />
+              </Card>
               {multiDay && (
                 <Card title="Activity by hour">
                   <HourlyChart hourly={r.hourly} height={150} />

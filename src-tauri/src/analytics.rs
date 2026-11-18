@@ -154,6 +154,55 @@ pub fn category_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Resu
     out
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteUsage {
+    pub id: i64,
+    pub domain: String,
+    pub category_id: Option<i64>,
+    pub category: String,
+    pub color: String,
+    pub kind: String,
+    pub secs: i64,
+    pub sessions: i64,
+}
+
+/// Every known website with its usage in the range (unused sites get 0).
+pub fn site_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<SiteUsage>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.id, w.domain, c.id,
+                COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral'),
+                COALESCE(SUM(s.duration_secs), 0) AS secs, COUNT(s.id)
+         FROM websites w
+         LEFT JOIN categories c ON c.id = w.category_id
+         LEFT JOIN website_sessions s ON s.website_id = w.id AND s.day BETWEEN ?1 AND ?2
+         GROUP BY w.id
+         ORDER BY secs DESC, w.domain",
+    )?;
+    let rows = stmt.query_map(params![from, to], |r| {
+        Ok(SiteUsage {
+            id: r.get(0)?,
+            domain: r.get(1)?,
+            category_id: r.get(2)?,
+            category: r.get(3)?,
+            color: r.get(4)?,
+            kind: r.get(5)?,
+            secs: r.get(6)?,
+            sessions: r.get(7)?,
+        })
+    })?;
+    let out = rows.collect();
+    out
+}
+
+pub fn site_total(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(duration_secs), 0) FROM website_sessions WHERE day BETWEEN ?1 AND ?2",
+        params![from, to],
+        |r| r.get(0),
+    )
+}
+
 /// Active spans in the range, ordered by start.
 pub fn active_spans(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
     let mut stmt = conn.prepare(

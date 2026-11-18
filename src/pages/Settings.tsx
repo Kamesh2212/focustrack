@@ -1,12 +1,20 @@
 import { useState, type ReactNode } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Bell, ShieldCheck } from "lucide-react";
 import { api, isTauri } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import type { Settings as SettingsT, Theme } from "../lib/types";
 import { Button, Card, ConfirmButton, ErrorNote, PageHeader, Segmented, Toggle } from "../components/ui";
+import { InstallSteps, browserLabel, StatusDot, useBrowserStatus } from "../components/ExtensionStatus";
 
 const IDLE_OPTIONS = [60, 120, 180, 300, 600, 900, 1800];
 const RETENTION_OPTIONS = [30, 90, 180, 365];
+const BREAK_OPTIONS = [0, 45, 60, 90, 120, 180];
+
+function ago(secs: number): string {
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.round(secs / 60)} min ago`;
+  return `${Math.round(secs / 3600)} h ago`;
+}
 
 function Row({ title, desc, children }: { title: string; desc?: ReactNode; children: ReactNode }) {
   return (
@@ -22,6 +30,7 @@ function Row({ title, desc, children }: { title: string; desc?: ReactNode; child
 
 export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) => void }) {
   const { data, error, reload } = useLoad(() => api.settings(), []);
+  const browser = useBrowserStatus();
   const [retention, setRetention] = useState(90);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -76,6 +85,61 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
           </Row>
         </Card>
 
+        <Card title="Notifications">
+          <Row title="Desktop notifications" desc="Limit warnings, limits reached and break reminders appear as Windows notifications.">
+            <Toggle label="Desktop notifications" checked={s.notificationsEnabled} onChange={(on) => run(() => api.setNotificationsEnabled(on))} />
+          </Row>
+          <Row title="Break reminder" desc="Remind me after this much continuous computer use. A 5-minute break resets it.">
+            <select
+              value={s.breakReminderMins}
+              onChange={(e) => run(() => api.setBreakReminder(Number(e.target.value)))}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+            >
+              {BREAK_OPTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {m === 0 ? "Off" : m < 60 ? `${m} minutes` : `${m / 60} hour${m === 60 ? "" : "s"}`}
+                </option>
+              ))}
+            </select>
+          </Row>
+          <Row title="Test" desc="Check that Windows shows FocusTrack notifications (Focus Assist / Do Not Disturb can hide them).">
+            <Button onClick={() => run(() => api.testNotification(), "Test notification sent.")}>
+              <Bell size={15} /> Send test
+            </Button>
+          </Row>
+        </Card>
+
+        <Card title="Website tracking">
+          <Row title="Track websites" desc="Uses the FocusTrack browser extension. Only domains are recorded; private windows never are.">
+            <Toggle label="Track websites" checked={s.websiteTracking} onChange={(on) => run(() => api.setWebsiteTracking(on))} />
+          </Row>
+          <Row
+            title="Browser extensions"
+            desc={
+              browser.data && !browser.data.serverRunning
+                ? `Not available: port ${browser.data.port} is in use by another program.`
+                : browser.data?.browsers.length
+                  ? undefined
+                  : "No browser has connected yet."
+            }
+          >
+            <div className="flex flex-col items-end gap-1 text-sm">
+              {browser.data?.browsers.map((b) => (
+                <span key={b.browser} className="flex items-center gap-2">
+                  <StatusDot on={b.connected} />
+                  {browserLabel(b.browser)}
+                  <span className="text-xs text-slate-500">{ago(b.lastSeenSecs)}</span>
+                </span>
+              ))}
+            </div>
+          </Row>
+          {!browser.data?.browsers.some((b) => b.connected) && (
+            <div className="pt-3">
+              <InstallSteps />
+            </div>
+          )}
+        </Card>
+
         <Card title="Appearance">
           <Row title="Theme">
             <Segmented<Theme>
@@ -97,8 +161,8 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
           <div className="mb-2 flex gap-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600 dark:bg-slate-800/50 dark:text-slate-300">
             <ShieldCheck size={18} className="mt-0.5 shrink-0 text-emerald-600" />
             <div>
-              FocusTrack records only <b>which application is in the foreground</b> and <b>when</b>, plus whether
-              you are idle. It never records keystrokes, window contents, screenshots or passwords, and all data stays
+              FocusTrack records only <b>which application is in the foreground</b>, the <b>domain</b> of your active
+              browser tab (with the extension), <b>when</b>, and whether you are idle. It never records keystrokes, window contents, screenshots or passwords, and all data stays
               on this computer.
             </div>
           </div>

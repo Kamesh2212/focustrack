@@ -10,6 +10,9 @@ import type {
   Report,
   SessionRow,
   Settings,
+  SiteUsage,
+  LimitStatus,
+  BrowserStatus,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -36,11 +39,32 @@ const APPS: [number, string, string, number, number][] = [
   [8, "Windows Terminal", "WindowsTerminal.exe", 3, 25],
 ];
 
+const SITES: [number, string, number, number][] = [
+  // id, domain, categoryId, typical minutes/day
+  [1, "youtube.com", 5, 80],
+  [2, "github.com", 3, 70],
+  [3, "instagram.com", 6, 45],
+  [4, "reddit.com", 6, 35],
+  [5, "linkedin.com", 6, 25],
+  [6, "stackoverflow.com", 3, 20],
+  [7, "mail.google.com", 4, 15],
+];
+
+let limits: LimitStatus[] = [
+  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, block: true, enabled: true, usedSecs: 3010 },
+  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, block: false, enabled: true, usedSecs: 1950 },
+  { id: 3, targetType: "app", targetId: 6, name: "Steam", color: "#8b5cf6", dailyLimitSecs: 7200, warnPct: 80, block: false, enabled: true, usedSecs: 2400 },
+];
+let nextLimitId = 4;
+
 const settings: Settings = {
   paused: false,
   idleThresholdSecs: 300,
   autostart: true,
   theme: "system",
+  notificationsEnabled: true,
+  breakReminderMins: 120,
+  websiteTracking: true,
   dataDir: "C:\\Users\\you\\AppData\\Roaming\\com.focustrack.app",
 };
 
@@ -75,6 +99,22 @@ function appsFor(from: string, to: string): AppUsage[] {
       sessions += 1 + Math.floor(hash(d + name) * 6);
     }
     return { id, name, exeName, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
+  });
+  return out.sort((a, b) => b.secs - a.secs);
+}
+
+function sitesFor(from: string, to: string): SiteUsage[] {
+  const out = SITES.map(([id, domain, categoryId, mins]) => {
+    const cat = CATEGORIES.find((c) => c.id === categoryId)!;
+    let secs = 0;
+    let sessions = 0;
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const isToday = d === today();
+      const portion = isToday ? Math.min(1, new Date().getHours() / 20) : 1;
+      secs += Math.round(mins * 60 * (0.4 + hash(d + domain) * 1.2) * portion);
+      sessions += 2 + Math.floor(hash(domain + d) * 8);
+    }
+    return { id, domain, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
   });
   return out.sort((a, b) => b.secs - a.secs);
 }
@@ -135,6 +175,8 @@ function dashboard(): Dashboard {
     sessionCount: 4,
     ...split(cats),
     topApps: apps.slice(0, 8),
+    topSites: sitesFor(t, t).slice(0, 8),
+    siteSecs: sitesFor(t, t).reduce((s, x) => s + x.secs, 0),
     categories: cats,
     week,
     hourly: hourly(day.activeSecs).map((v, h) => (h > new Date().getHours() ? 0 : v)),
@@ -142,6 +184,7 @@ function dashboard(): Dashboard {
       state: settings.paused ? "paused" : "active",
       appName: settings.paused ? null : "Visual Studio Code",
       exeName: settings.paused ? null : "Code.exe",
+      domain: null,
       since: settings.paused
         ? null
         : `${t} ${p(sinceDate.getHours())}:${p(sinceDate.getMinutes())}:${p(sinceDate.getSeconds())}`,
@@ -172,12 +215,25 @@ function report(from: string, to: string): Report {
     peakHour: hours.indexOf(Math.max(...hours)),
     days,
     apps,
+    sites: sitesFor(from, to),
+    siteSecs: sitesFor(from, to).reduce((s, x) => s + x.secs, 0),
     categories: cats,
     hourly: hours,
     heatmap: Array.from({ length: 7 }, (_, wd) =>
       hourly(active / 7).map((v, h) => Math.round(v * (wd >= 5 ? 0.5 : 1) * (0.6 + hash(`${wd}-${h}`) * 0.8))),
     ),
   };
+}
+
+function siteHistory(from: string, to: string, search: string): SessionRow[] {
+  const q = search.trim().toLowerCase();
+  return history(from, to, "")
+    .map((r, i) => {
+      const [, domain, catId] = SITES[Math.floor(hash(r.start + i) * SITES.length)];
+      const cat = CATEGORIES.find((c) => c.id === catId)!;
+      return { ...r, appName: domain, exeName: "chrome", category: cat.name, color: cat.color };
+    })
+    .filter((r) => !q || [r.appName, r.category].some((x) => x.toLowerCase().includes(q)));
 }
 
 function history(from: string, to: string, search: string): SessionRow[] {
@@ -220,9 +276,38 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "get_report":
         return report(a.from, a.to);
       case "get_history":
-        return history(a.from, a.to, a.search ?? "");
+        return a.kind === "websites" ? siteHistory(a.from, a.to, a.search ?? "") : history(a.from, a.to, a.search ?? "");
+      case "get_websites":
+        return sitesFor(a.from, a.to);
+      case "get_browser_status":
+        return { serverRunning: true, port: 17865, browsers: [{ browser: "chrome", lastSeenSecs: 4, connected: true }] } satisfies BrowserStatus;
+      case "get_limits":
+        return limits.map((l) => ({ ...l }));
+      case "set_limit": {
+        const l = args as unknown as LimitStatus;
+        const existing = limits.find((x) => x.targetType === l.targetType && x.targetId === l.targetId);
+        const name =
+          l.targetType === "app"
+            ? APPS.find((x) => x[0] === l.targetId)?.[1] ?? "App"
+            : SITES.find((x) => x[0] === l.targetId)?.[1] ?? "site";
+        if (existing) Object.assign(existing, l);
+        else limits.push({ ...l, id: nextLimitId++, name, color: "#6366f1", usedSecs: 600 });
+        return null;
+      }
+      case "delete_limit":
+        limits = limits.filter((l) => l.id !== a.id);
+        return null;
+      case "set_notifications_enabled":
+        settings.notificationsEnabled = a.enabled;
+        return null;
+      case "set_break_reminder":
+        settings.breakReminderMins = a.mins;
+        return null;
+      case "set_website_tracking":
+        settings.websiteTracking = a.enabled;
+        return null;
       case "export_csv":
-        return `C:\\Users\\you\\Downloads\\focustrack-${a.from}-to-${a.to}.csv`;
+        return `C:\\Users\\you\\Downloads\\focustrack-${a.kind}-${a.from}-to-${a.to}.csv`;
       case "get_settings":
         return { ...settings };
       case "set_paused":

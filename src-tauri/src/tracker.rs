@@ -2,6 +2,8 @@
 //!
 //! Polls once a second on its own thread with its own SQLite connection:
 //!   * foreground app  -> `usage_sessions`
+//!   * active tab domain while a browser is in front -> `website_sessions`
+//!     (reported by the browser extension via `browser.rs`)
 //!   * no input for longer than the idle threshold -> `idle_periods`
 //!   * locked / paused / suspended -> nothing is recorded
 //!
@@ -11,6 +13,8 @@
 //! wall-clock time between polls; the open span is closed at the last poll
 //! before the jump.
 
+use crate::browser::{BrowserReport, FRESH_SECS};
+use crate::categories::browser_family;
 use crate::db::{self, SpanKind};
 use crate::platform::{self, ForegroundApp};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
@@ -35,6 +39,8 @@ pub struct LiveStatus {
     pub state: String,
     pub app_name: Option<String>,
     pub exe_name: Option<String>,
+    /// Active website when a browser is in front and its extension reports.
+    pub domain: Option<String>,
     /// When the current app session / idle period started.
     pub since: Option<String>,
     pub idle_secs: u64,
@@ -49,6 +55,14 @@ pub struct Shared {
     pub shutdown: AtomicBool,
     pub stopped: AtomicBool,
     pub status: Mutex<LiveStatus>,
+    /// Latest report from each browser's extension, keyed by browser family.
+    pub browsers: Mutex<HashMap<String, BrowserReport>>,
+    /// Domains the extensions should block (limit reached, blocking on).
+    pub blocklist: Mutex<Vec<String>>,
+    pub website_tracking: AtomicBool,
+    pub server_running: AtomicBool,
+    pub notifications_enabled: AtomicBool,
+    pub break_reminder_mins: AtomicU64,
 }
 
 impl Shared {
@@ -60,6 +74,12 @@ impl Shared {
             shutdown: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             status: Mutex::new(LiveStatus { state: "starting".into(), ..Default::default() }),
+            browsers: Mutex::new(HashMap::new()),
+            blocklist: Mutex::new(Vec::new()),
+            website_tracking: AtomicBool::new(true),
+            server_running: AtomicBool::new(false),
+            notifications_enabled: AtomicBool::new(true),
+            break_reminder_mins: AtomicU64::new(0),
         }
     }
 
@@ -143,13 +163,23 @@ struct ActiveSpan {
     name: String,
 }
 
+#[derive(Debug, Clone)]
+struct SiteSpan {
+    span: Span,
+    website_id: i64,
+    domain: String,
+    browser: String,
+}
+
 pub struct Tracker<P: Probe> {
     conn: Connection,
     shared: Arc<Shared>,
     probe: P,
     active: Option<ActiveSpan>,
     idle: Option<Span>,
+    site: Option<SiteSpan>,
     apps: HashMap<String, (i64, String)>,
+    sites: HashMap<String, i64>,
     last_tick: NaiveDateTime,
     ticks: u64,
 }
@@ -162,7 +192,9 @@ impl<P: Probe> Tracker<P> {
             probe,
             active: None,
             idle: None,
+            site: None,
             apps: HashMap::new(),
+            sites: HashMap::new(),
             last_tick: start,
             ticks: 0,
         }
@@ -172,6 +204,7 @@ impl<P: Probe> Tracker<P> {
         if self.shared.reset_requested.swap(false, Ordering::SeqCst) {
             self.active = None;
             self.idle = None;
+            self.site = None;
         }
 
         // Sleep / hibernate / clock change: close everything at the last poll.
@@ -210,6 +243,10 @@ impl<P: Probe> Tracker<P> {
                 let end = last_input.max(a.span.start);
                 self.finish(SpanKind::Usage, a.span, end);
             }
+            if let Some(w) = self.site.take() {
+                let end = last_input.max(w.span.start);
+                self.finish(SpanKind::Website, w.span, end);
+            }
             match self.idle.as_mut() {
                 Some(span) => span.last = now,
                 None => self.idle = self.open_idle(last_input, now),
@@ -230,6 +267,7 @@ impl<P: Probe> Tracker<P> {
                 if let Some(a) = self.active.take() {
                     self.finish(SpanKind::Usage, a.span, now);
                 }
+                self.update_site(None, now);
                 self.set_status(LiveStatus { state: "active".into(), idle_secs, ..Default::default() });
             }
             Some(app) => {
@@ -248,11 +286,14 @@ impl<P: Probe> Tracker<P> {
                     }
                     self.active = self.open_usage(&app, now);
                 }
+                let site = self.current_site(&app.exe_name, now);
+                self.update_site(site, now);
                 let status = match &self.active {
                     Some(a) => LiveStatus {
                         state: "active".into(),
                         app_name: Some(a.name.clone()),
                         exe_name: Some(a.exe.clone()),
+                        domain: self.site.as_ref().map(|w| w.domain.clone()),
                         since: Some(db::fmt_time(a.span.start)),
                         idle_secs,
                     },
@@ -273,6 +314,78 @@ impl<P: Probe> Tracker<P> {
             let end = end.max(s.start);
             self.finish(SpanKind::Idle, s, end);
         }
+        if let Some(w) = self.site.take() {
+            let end = end.max(w.span.start);
+            self.finish(SpanKind::Website, w.span, end);
+        }
+    }
+
+    /// The domain the browser's extension reports for the foreground browser.
+    fn current_site(&self, exe_name: &str, now: NaiveDateTime) -> Option<(String, String)> {
+        if !self.shared.website_tracking.load(Ordering::SeqCst) {
+            return None;
+        }
+        let family = browser_family(exe_name)?;
+        let reports = self.shared.browsers.lock().ok()?;
+        let fresh = |r: &BrowserReport| (now - r.at).num_seconds() <= FRESH_SECS;
+        // Prefer the matching browser; otherwise (e.g. an unrecognised
+        // Chromium build) fall back to the most recently focused report.
+        let (browser, report) = match reports.get(family) {
+            Some(r) => (family.to_string(), r),
+            None => reports
+                .iter()
+                .filter(|(_, r)| r.focused && fresh(r))
+                .max_by_key(|(_, r)| r.at)
+                .map(|(k, r)| (k.clone(), r))?,
+        };
+        if !fresh(report) {
+            return None;
+        }
+        report.domain.clone().map(|d| (browser, d))
+    }
+
+    fn update_site(&mut self, site: Option<(String, String)>, now: NaiveDateTime) {
+        let same = matches!((&self.site, &site), (Some(cur), Some((b, d))) if cur.domain == *d && cur.browser == *b);
+        if same {
+            if let Some(w) = self.site.as_mut() {
+                w.span.last = now;
+            }
+            return;
+        }
+        if let Some(w) = self.site.take() {
+            self.finish(SpanKind::Website, w.span, now);
+        }
+        if let Some((browser, domain)) = site {
+            self.site = self.open_site(&browser, &domain, now);
+        }
+    }
+
+    fn open_site(&mut self, browser: &str, domain: &str, now: NaiveDateTime) -> Option<SiteSpan> {
+        let website_id = match self.sites.get(domain) {
+            Some(id) => *id,
+            None => match db::get_or_create_website(&self.conn, domain, now) {
+                Ok(id) => {
+                    self.sites.insert(domain.to_string(), id);
+                    id
+                }
+                Err(e) => {
+                    eprintln!("[tracker] website lookup failed: {e}");
+                    return None;
+                }
+            },
+        };
+        match db::insert_website_session(&self.conn, website_id, browser, now) {
+            Ok(id) => Some(SiteSpan {
+                span: Span { id, start: now, last: now },
+                website_id,
+                domain: domain.to_string(),
+                browser: browser.to_string(),
+            }),
+            Err(e) => {
+                eprintln!("[tracker] insert website session failed: {e}");
+                None
+            }
+        }
     }
 
     /// Keeps every row within a single calendar day.
@@ -292,6 +405,15 @@ impl<P: Probe> Tracker<P> {
                 let s = self.idle.take().unwrap();
                 self.finish(SpanKind::Idle, s, mid);
                 self.idle = self.open_idle(mid, now);
+            }
+        }
+        if let Some(w) = self.site.as_ref() {
+            if w.span.start < mid {
+                let w = self.site.take().unwrap();
+                self.finish(SpanKind::Website, w.span.clone(), mid);
+                if let Ok(id) = db::insert_website_session(&self.conn, w.website_id, &w.browser, mid) {
+                    self.site = Some(SiteSpan { span: Span { id, start: mid, last: now }, ..w });
+                }
             }
         }
     }
@@ -370,6 +492,9 @@ impl<P: Probe> Tracker<P> {
         }
         if let Some(s) = &self.idle {
             let _ = db::update_span(&self.conn, SpanKind::Idle, s.id, s.start, s.last);
+        }
+        if let Some(w) = &self.site {
+            let _ = db::update_span(&self.conn, SpanKind::Website, w.span.id, w.span.start, w.span.last);
         }
     }
 
@@ -530,6 +655,82 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].1.as_str(), rows[0].2), ("2026-11-18", 60));
         assert_eq!((rows[1].1.as_str(), rows[1].2), ("2026-11-19", 60));
+    }
+
+    fn report(t: &Tracker<Fake>, browser: &str, domain: Option<&str>, at: NaiveDateTime) {
+        t.shared.browsers.lock().unwrap().insert(
+            browser.into(),
+            BrowserReport { domain: domain.map(String::from), focused: true, at },
+        );
+    }
+
+    fn sites(t: &Tracker<Fake>) -> Vec<(String, String, i64)> {
+        let mut stmt = t
+            .conn
+            .prepare(
+                "SELECT w.domain, s.browser, s.duration_secs FROM website_sessions s
+                 JOIN websites w ON w.id = s.website_id ORDER BY s.id",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    }
+
+    #[test]
+    fn browser_time_is_attributed_to_reported_domain() {
+        let mut t = setup(at(18, 9, 0, 0));
+        t.probe.app = Some("brave.exe");
+        report(&t, "brave", Some("github.com"), at(18, 9, 0, 0));
+        run(&mut t, at(18, 9, 0, 0), at(18, 9, 1, 0));
+        report(&t, "brave", Some("youtube.com"), at(18, 9, 1, 1));
+        run(&mut t, at(18, 9, 1, 1), at(18, 9, 2, 0));
+        assert_eq!(t.shared.status().domain.as_deref(), Some("youtube.com"));
+        // Switch to a non-browser app: website time stops.
+        t.probe.app = Some("code.exe");
+        run(&mut t, at(18, 9, 2, 1), at(18, 9, 3, 0));
+        t.close_all(at(18, 9, 3, 0));
+
+        let rows = sites(&t);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("github.com".into(), "brave".into(), 61));
+        assert_eq!(rows[1], ("youtube.com".into(), "brave".into(), 60));
+    }
+
+    #[test]
+    fn stale_or_disabled_reports_are_ignored() {
+        let mut t = setup(at(18, 9, 0, 0));
+        t.probe.app = Some("chrome.exe");
+        report(&t, "chrome", Some("reddit.com"), at(18, 8, 0, 0)); // an hour old
+        run(&mut t, at(18, 9, 0, 0), at(18, 9, 0, 30));
+        assert!(sites(&t).is_empty());
+
+        report(&t, "chrome", Some("reddit.com"), at(18, 9, 0, 31));
+        t.shared.website_tracking.store(false, Ordering::SeqCst);
+        run(&mut t, at(18, 9, 0, 31), at(18, 9, 1, 0));
+        assert!(sites(&t).is_empty());
+        let total: i64 = usage(&t).iter().map(|r| r.2).sum();
+        assert!(total > 0, "app time is still tracked");
+    }
+
+    #[test]
+    fn website_time_stops_when_idle() {
+        let mut t = setup(at(18, 9, 0, 0));
+        t.probe.app = Some("msedge.exe");
+        let mut cur = at(18, 9, 0, 0);
+        while cur <= at(18, 9, 10, 0) {
+            report(&t, "edge", Some("netflix.com"), cur);
+            t.probe.idle = ((cur - at(18, 9, 0, 0)).num_seconds() - 120).max(0) as u64;
+            t.tick(cur);
+            cur += Duration::seconds(1);
+        }
+        t.close_all(at(18, 9, 10, 0));
+        // Last input at 09:02:00; the idle threshold is reached at 09:07:00
+        // and website time is trimmed back to the last input.
+        assert_eq!(sites(&t)[0].2, 120);
     }
 
     #[test]

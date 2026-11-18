@@ -6,6 +6,7 @@ export interface LiveStatus {
   state: TrackingState;
   appName: string | null;
   exeName: string | null;
+  domain: string | null;
   since: string | null;
   idleSecs: number;
 }
@@ -29,6 +30,38 @@ export interface AppUsage {
   secs: number;
   sessions: number;
 }
+
+export interface SiteUsage {
+  id: number;
+  domain: string;
+  categoryId: number | null;
+  category: string;
+  color: string;
+  kind: CategoryKind;
+  secs: number;
+  sessions: number;
+}
+
+export interface LimitStatus {
+  id: number;
+  targetType: "app" | "website";
+  targetId: number;
+  name: string;
+  color: string;
+  dailyLimitSecs: number;
+  warnPct: number;
+  block: boolean;
+  enabled: boolean;
+  usedSecs: number;
+}
+
+export interface BrowserStatus {
+  serverRunning: boolean;
+  port: number;
+  browsers: { browser: string; lastSeenSecs: number; connected: boolean }[];
+}
+
+export type HistoryKind = "apps" | "websites";
 
 export interface CategoryUsage {
   name: string;
@@ -56,6 +89,8 @@ export interface Dashboard {
   productiveSecs: number;
   distractingSecs: number;
   topApps: AppUsage[];
+  topSites: SiteUsage[];
+  siteSecs: number;
   categories: CategoryUsage[];
   week: DayTotal[];
   hourly: number[];
@@ -76,6 +111,8 @@ export interface Report {
   peakHour: number | null;
   days: DayTotal[];
   apps: AppUsage[];
+  sites: SiteUsage[];
+  siteSecs: number;
   categories: CategoryUsage[];
   hourly: number[];
   heatmap: number[][];
@@ -101,4 +138,7 @@ export interface Settings {
   autostart: boolean;
   theme: Theme;
   dataDir: string;
+  notificationsEnabled: boolean;
+  breakReminderMins: number;
+  websiteTracking: boolean;
 }

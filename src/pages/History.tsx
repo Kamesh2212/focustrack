@@ -3,8 +3,8 @@ import { Download, Search } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import { addDays, clock, dayLabel, fmtDuration, today } from "../lib/format";
-import type { SessionRow } from "../lib/types";
-import { Button, Card, DateInput, Empty, ErrorNote, PageHeader } from "../components/ui";
+import type { HistoryKind, SessionRow } from "../lib/types";
+import { Button, Card, DateInput, Empty, ErrorNote, PageHeader, Segmented } from "../components/ui";
 
 function groupByDay(rows: SessionRow[]): [string, SessionRow[]][] {
   const map = new Map<string, SessionRow[]>();
@@ -16,12 +16,13 @@ export default function History() {
   const [from, setFrom] = useState(addDays(today(), -6));
   const [to, setTo] = useState(today());
   const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<HistoryKind>("apps");
   const [notice, setNotice] = useState<string | null>(null);
-  const { data, error, loading } = useLoad(() => api.history(from, to, query), [from, to, query]);
+  const { data, error, loading } = useLoad(() => api.history(from, to, query, kind), [from, to, query, kind]);
 
   const exportCsv = async () => {
     try {
-      const path = await api.exportCsv(from, to, query);
+      const path = await api.exportCsv(from, to, query, kind);
       setNotice(`Exported to ${path}`);
     } catch (e) {
       setNotice(`Export failed: ${e}`);
@@ -32,7 +33,7 @@ export default function History() {
     <>
       <PageHeader
         title="History"
-        subtitle="Every recorded application session. Filter by date, app or category."
+        subtitle="Every recorded application and website session. Filter by date, name or category."
         actions={
           <Button variant="primary" onClick={exportCsv}>
             <Download size={15} /> Export CSV
@@ -47,6 +48,14 @@ export default function History() {
       )}
       <Card>
         <div className="mb-4 flex flex-wrap items-center gap-3">
+          <Segmented<HistoryKind>
+            value={kind}
+            onChange={setKind}
+            options={[
+              { value: "apps", label: "Applications" },
+              { value: "websites", label: "Websites" },
+            ]}
+          />
           <div className="flex items-center gap-1.5 text-sm">
             <DateInput value={from} max={to} onChange={setFrom} />
             <span className="text-slate-400">to</span>
@@ -57,7 +66,7 @@ export default function History() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter by application or category"
+              placeholder={kind === "apps" ? "Filter by application or category" : "Filter by website or category"}
               className="w-full bg-transparent text-sm outline-none"
             />
           </label>

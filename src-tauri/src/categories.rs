@@ -48,9 +48,138 @@ pub fn default_category_for(exe_lower: &str) -> &'static str {
     }
 }
 
+/// Best-guess category for a website domain (lower-case, no `www.`).
+/// Matches the domain itself or any parent domain (`m.youtube.com` -> youtube.com).
+pub fn default_category_for_domain(domain: &str) -> &'static str {
+    const MAP: &[(&str, &str)] = &[
+        ("youtube.com", "Entertainment"),
+        ("youtu.be", "Entertainment"),
+        ("netflix.com", "Entertainment"),
+        ("primevideo.com", "Entertainment"),
+        ("disneyplus.com", "Entertainment"),
+        ("hotstar.com", "Entertainment"),
+        ("twitch.tv", "Entertainment"),
+        ("spotify.com", "Entertainment"),
+        ("soundcloud.com", "Entertainment"),
+        ("imdb.com", "Entertainment"),
+        ("9gag.com", "Entertainment"),
+        ("instagram.com", "Social Media"),
+        ("facebook.com", "Social Media"),
+        ("x.com", "Social Media"),
+        ("twitter.com", "Social Media"),
+        ("reddit.com", "Social Media"),
+        ("tiktok.com", "Social Media"),
+        ("linkedin.com", "Social Media"),
+        ("pinterest.com", "Social Media"),
+        ("snapchat.com", "Social Media"),
+        ("threads.net", "Social Media"),
+        ("tumblr.com", "Social Media"),
+        ("quora.com", "Social Media"),
+        ("github.com", "Development"),
+        ("gitlab.com", "Development"),
+        ("bitbucket.org", "Development"),
+        ("stackoverflow.com", "Development"),
+        ("stackexchange.com", "Development"),
+        ("developer.mozilla.org", "Development"),
+        ("npmjs.com", "Development"),
+        ("crates.io", "Development"),
+        ("docs.rs", "Development"),
+        ("pypi.org", "Development"),
+        ("vercel.com", "Development"),
+        ("localhost", "Development"),
+        ("claude.ai", "Productivity"),
+        ("chatgpt.com", "Productivity"),
+        ("docs.google.com", "Productivity"),
+        ("drive.google.com", "Productivity"),
+        ("sheets.google.com", "Productivity"),
+        ("calendar.google.com", "Productivity"),
+        ("notion.so", "Productivity"),
+        ("figma.com", "Productivity"),
+        ("trello.com", "Productivity"),
+        ("asana.com", "Productivity"),
+        ("linear.app", "Productivity"),
+        ("office.com", "Productivity"),
+        ("canva.com", "Productivity"),
+        ("mail.google.com", "Communication"),
+        ("gmail.com", "Communication"),
+        ("outlook.live.com", "Communication"),
+        ("outlook.office.com", "Communication"),
+        ("web.whatsapp.com", "Communication"),
+        ("web.telegram.org", "Communication"),
+        ("discord.com", "Communication"),
+        ("slack.com", "Communication"),
+        ("teams.microsoft.com", "Communication"),
+        ("meet.google.com", "Communication"),
+        ("zoom.us", "Communication"),
+        ("wikipedia.org", "Education"),
+        ("coursera.org", "Education"),
+        ("udemy.com", "Education"),
+        ("edx.org", "Education"),
+        ("khanacademy.org", "Education"),
+        ("duolingo.com", "Education"),
+        ("leetcode.com", "Education"),
+        ("geeksforgeeks.org", "Education"),
+        ("w3schools.com", "Education"),
+        ("scholar.google.com", "Education"),
+        ("store.steampowered.com", "Gaming"),
+        ("steamcommunity.com", "Gaming"),
+        ("epicgames.com", "Gaming"),
+        ("roblox.com", "Gaming"),
+        ("chess.com", "Gaming"),
+        ("lichess.org", "Gaming"),
+    ];
+    // Most specific match wins: try the full domain, then each parent.
+    let mut d = domain;
+    loop {
+        if let Some((_, cat)) = MAP.iter().find(|(k, _)| *k == d) {
+            return cat;
+        }
+        match d.find('.') {
+            Some(i) => d = &d[i + 1..],
+            None => return "Other",
+        }
+    }
+}
+
+/// Browser family for a foreground executable, matching what the extension
+/// reports (`chrome`, `edge`, `brave`, `firefox`, `opera`, `vivaldi`).
+pub fn browser_family(exe_name: &str) -> Option<&'static str> {
+    let lower = exe_name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    Some(match stem {
+        "chrome" | "chromium" => "chrome",
+        "msedge" => "edge",
+        "brave" => "brave",
+        "firefox" | "librewolf" | "waterfox" | "zen" | "floorp" => "firefox",
+        "opera" | "opera_gx" => "opera",
+        "vivaldi" => "vivaldi",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domains_map_to_categories() {
+        assert_eq!(default_category_for_domain("youtube.com"), "Entertainment");
+        assert_eq!(default_category_for_domain("m.youtube.com"), "Entertainment");
+        assert_eq!(default_category_for_domain("mail.google.com"), "Communication");
+        assert_eq!(default_category_for_domain("docs.google.com"), "Productivity");
+        assert_eq!(default_category_for_domain("google.com"), "Other");
+        assert_eq!(default_category_for_domain("en.wikipedia.org"), "Education");
+        assert_eq!(default_category_for_domain("example.org"), "Other");
+    }
+
+    #[test]
+    fn browsers_detected() {
+        assert_eq!(browser_family("chrome.exe"), Some("chrome"));
+        assert_eq!(browser_family("MSEDGE.EXE"), Some("edge"));
+        assert_eq!(browser_family("brave.exe"), Some("brave"));
+        assert_eq!(browser_family("firefox.exe"), Some("firefox"));
+        assert_eq!(browser_family("code.exe"), None);
+    }
 
     #[test]
     fn known_apps_map_to_categories() {

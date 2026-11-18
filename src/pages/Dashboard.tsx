@@ -1,4 +1,4 @@
-import { Globe, Pause, Lock, Moon, Activity } from "lucide-react";
+import { Pause, Lock, Moon, Activity } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad, useNow } from "../lib/hooks";
 import { fmtDuration, pctChange } from "../lib/format";
@@ -6,6 +6,7 @@ import type { LiveStatus } from "../lib/types";
 import { Card, ErrorNote, PageHeader, Stat, cx } from "../components/ui";
 import { CategoryDonut, DailyChart, HourlyChart } from "../components/charts";
 import { AppList } from "../components/AppList";
+import { SiteList } from "../components/SiteList";
 
 function parseTs(ts: string): number {
   return new Date(ts.replace(" ", "T")).getTime();
@@ -15,7 +16,11 @@ function LiveBanner({ live }: { live: LiveStatus }) {
   const now = useNow();
   const elapsed = live.since ? Math.max(0, (now - parseTs(live.since)) / 1000) : 0;
   const view = {
-    active: { icon: Activity, tone: "bg-emerald-500", text: live.appName ? `Using ${live.appName}` : "Active" },
+    active: {
+      icon: Activity,
+      tone: "bg-emerald-500",
+      text: live.appName ? `Using ${live.appName}${live.domain ? ` · ${live.domain}` : ""}` : "Active",
+    },
     idle: { icon: Moon, tone: "bg-amber-500", text: "Idle — no keyboard or mouse input" },
     locked: { icon: Lock, tone: "bg-slate-400", text: "Computer locked" },
     paused: { icon: Pause, tone: "bg-slate-400", text: "Tracking paused" },
@@ -119,11 +124,15 @@ export default function Dashboard() {
           <Card title="Activity by hour">
             <HourlyChart hourly={d.hourly} height={140} />
           </Card>
-          <Card title="Most-used websites">
-            <div className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
-              <Globe size={18} />
-              Website tracking arrives with the browser extensions (Phase 3).
-            </div>
+          <Card
+            title="Most-used websites"
+            action={d.siteSecs > 0 && <span className="tabular text-xs text-slate-500">{fmtDuration(d.siteSecs)} on the web</span>}
+          >
+            <SiteList
+              sites={d.topSites}
+              limit={5}
+              empty="No websites yet. Install the browser extension (see Websites) to track them."
+            />
           </Card>
         </div>
       </div>

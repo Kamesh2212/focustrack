@@ -96,6 +96,47 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             )?;
         }
     }
+
+    if version < 2 {
+        // Phase 3: websites (via browser extensions), usage limits, notifications.
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS websites (
+                 id          INTEGER PRIMARY KEY,
+                 domain      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                 category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+                 first_seen  TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS website_sessions (
+                 id            INTEGER PRIMARY KEY,
+                 website_id    INTEGER NOT NULL REFERENCES websites(id) ON DELETE CASCADE,
+                 browser       TEXT NOT NULL,
+                 day           TEXT NOT NULL,
+                 start_time    TEXT NOT NULL,
+                 end_time      TEXT NOT NULL,
+                 duration_secs INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_web_day ON website_sessions(day);
+             CREATE INDEX IF NOT EXISTS idx_web_site_day ON website_sessions(website_id, day);
+             CREATE TABLE IF NOT EXISTS usage_limits (
+                 id               INTEGER PRIMARY KEY,
+                 target_type      TEXT NOT NULL CHECK (target_type IN ('app', 'website')),
+                 target_id        INTEGER NOT NULL,
+                 daily_limit_secs INTEGER NOT NULL,
+                 warn_pct         INTEGER NOT NULL DEFAULT 80,
+                 block            INTEGER NOT NULL DEFAULT 0,
+                 enabled          INTEGER NOT NULL DEFAULT 1,
+                 UNIQUE (target_type, target_id)
+             );
+             CREATE TABLE IF NOT EXISTS sent_notifications (
+                 key  TEXT NOT NULL,
+                 day  TEXT NOT NULL,
+                 PRIMARY KEY (key, day)
+             );
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -106,6 +147,10 @@ pub struct StoredSettings {
     pub paused: bool,
     pub idle_threshold_secs: u64,
     pub theme: String,
+    pub notifications_enabled: bool,
+    /// 0 = off
+    pub break_reminder_mins: u64,
+    pub website_tracking: bool,
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -132,7 +177,19 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<StoredSettings> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_IDLE_THRESHOLD_SECS);
     let theme = get_setting(conn, "theme")?.unwrap_or_else(|| "system".into());
-    Ok(StoredSettings { paused, idle_threshold_secs, theme })
+    let notifications_enabled = get_setting(conn, "notifications_enabled")?.as_deref() != Some("0");
+    let break_reminder_mins = get_setting(conn, "break_reminder_mins")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let website_tracking = get_setting(conn, "website_tracking")?.as_deref() != Some("0");
+    Ok(StoredSettings {
+        paused,
+        idle_threshold_secs,
+        theme,
+        notifications_enabled,
+        break_reminder_mins,
+        website_tracking,
+    })
 }
 
 // ------------------------------------------------------------ applications
@@ -166,12 +223,30 @@ pub fn get_or_create_app(
     Ok((conn.last_insert_rowid(), name))
 }
 
+/// Looks up a website by domain, creating it with a default category.
+pub fn get_or_create_website(conn: &Connection, domain: &str, now: NaiveDateTime) -> rusqlite::Result<i64> {
+    if let Some(id) = conn
+        .query_row("SELECT id FROM websites WHERE domain = ?1", params![domain], |r| r.get(0))
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let category = crate::categories::default_category_for_domain(domain);
+    conn.execute(
+        "INSERT INTO websites (domain, category_id, first_seen)
+         VALUES (?1, (SELECT id FROM categories WHERE name = ?2), ?3)",
+        params![domain, category, fmt_time(now)],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 // ---------------------------------------------------------------- sessions
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanKind {
     Usage,
     Idle,
+    Website,
 }
 
 impl SpanKind {
@@ -179,6 +254,7 @@ impl SpanKind {
         match self {
             SpanKind::Usage => "usage_sessions",
             SpanKind::Idle => "idle_periods",
+            SpanKind::Website => "website_sessions",
         }
     }
 }
@@ -189,6 +265,21 @@ pub fn insert_usage(conn: &Connection, app_id: i64, start: NaiveDateTime) -> rus
         "INSERT INTO usage_sessions (app_id, day, start_time, end_time, duration_secs)
          VALUES (?1, ?2, ?3, ?3, 0)",
         params![app_id, start.format(DAY_FMT).to_string(), s],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn insert_website_session(
+    conn: &Connection,
+    website_id: i64,
+    browser: &str,
+    start: NaiveDateTime,
+) -> rusqlite::Result<i64> {
+    let s = fmt_time(start);
+    conn.execute(
+        "INSERT INTO website_sessions (website_id, browser, day, start_time, end_time, duration_secs)
+         VALUES (?1, ?2, ?3, ?4, ?4, 0)",
+        params![website_id, browser, start.format(DAY_FMT).to_string(), s],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -228,6 +319,25 @@ pub fn delete_span(conn: &Connection, kind: SpanKind, id: i64) -> rusqlite::Resu
     Ok(())
 }
 
+// ------------------------------------------------------------------ limits
+
+/// Records that a notification was sent; returns false if it already was today.
+pub fn mark_notified(conn: &Connection, key: &str, day: &str) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO sent_notifications (key, day) VALUES (?1, ?2)",
+        params![key, day],
+    )?;
+    Ok(n == 1)
+}
+
+pub fn clear_limit_notifications(conn: &Connection, limit_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM sent_notifications WHERE key LIKE ?1",
+        params![format!("limit:{limit_id}:%")],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- deletion
 
 pub fn delete_all_usage(conn: &Connection) -> rusqlite::Result<()> {
@@ -235,6 +345,8 @@ pub fn delete_all_usage(conn: &Connection) -> rusqlite::Result<()> {
         "BEGIN;
          DELETE FROM usage_sessions;
          DELETE FROM idle_periods;
+         DELETE FROM website_sessions;
+         DELETE FROM sent_notifications;
          COMMIT;",
     )
 }
@@ -242,7 +354,9 @@ pub fn delete_all_usage(conn: &Connection) -> rusqlite::Result<()> {
 pub fn delete_usage_before(conn: &Connection, day: &str) -> rusqlite::Result<usize> {
     let a = conn.execute("DELETE FROM usage_sessions WHERE day < ?1", params![day])?;
     let b = conn.execute("DELETE FROM idle_periods WHERE day < ?1", params![day])?;
-    Ok(a + b)
+    let c = conn.execute("DELETE FROM website_sessions WHERE day < ?1", params![day])?;
+    conn.execute("DELETE FROM sent_notifications WHERE day < ?1", params![day])?;
+    Ok(a + b + c)
 }
 
 #[cfg(test)]
@@ -260,6 +374,8 @@ mod tests {
         migrate(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
         assert_eq!(n as usize, DEFAULT_CATEGORIES.len());
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
     }
 
     #[test]
@@ -301,5 +417,25 @@ mod tests {
         let s = load_settings(&conn).unwrap();
         assert!(s.paused);
         assert_eq!(s.idle_threshold_secs, 120);
+    }
+
+    #[test]
+    fn websites_and_notifications() {
+        let conn = open_in_memory().unwrap();
+        let a = get_or_create_website(&conn, "youtube.com", t(9, 0, 0)).unwrap();
+        let b = get_or_create_website(&conn, "YouTube.com", t(9, 0, 0)).unwrap();
+        assert_eq!(a, b);
+        let cat: String = conn
+            .query_row(
+                "SELECT c.name FROM websites w JOIN categories c ON c.id = w.category_id WHERE w.id = ?1",
+                params![a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cat, "Entertainment");
+        assert!(mark_notified(&conn, "limit:1:warn", "2026-11-18").unwrap());
+        assert!(!mark_notified(&conn, "limit:1:warn", "2026-11-18").unwrap());
+        clear_limit_notifications(&conn, 1).unwrap();
+        assert!(mark_notified(&conn, "limit:1:warn", "2026-11-18").unwrap());
     }
 }
