@@ -58,8 +58,9 @@ mod imp {
     use super::{file_name, ForegroundApp};
     use std::ffi::c_void;
     use std::ptr::null_mut;
+    use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
     };
