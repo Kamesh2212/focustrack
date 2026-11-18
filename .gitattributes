@@ -1,0 +1,5 @@
+# Normalise line endings for all contributors (rustfmt/CI expect LF)
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
