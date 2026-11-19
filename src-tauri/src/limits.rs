@@ -76,7 +76,30 @@ impl LimitStatus {
 }
 
 /// All limits with today's usage.
+#[cfg(test)]
 pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitStatus>> {
+    limit_status_days(conn, day, None)
+}
+
+/// Limits right now. After a clock change, usage keeps counting against the
+/// real day (#11).
+pub fn current_status(conn: &Connection, now: NaiveDateTime) -> rusqlite::Result<Vec<LimitStatus>> {
+    let (day, extra) = crate::clock::limit_days(conn, now)?;
+    limit_status_days(conn, &day, extra.as_deref())
+}
+
+/// The day limits and their "+15 min" extensions count against right now.
+pub fn limit_day(conn: &Connection, now: NaiveDateTime) -> rusqlite::Result<String> {
+    Ok(crate::clock::limit_days(conn, now)?.0)
+}
+
+/// Limit status for `day`; usage recorded under `extra` counts too.
+fn limit_status_days(
+    conn: &Connection,
+    day: &str,
+    extra: Option<&str>,
+) -> rusqlite::Result<Vec<LimitStatus>> {
+    let also = extra.unwrap_or(day);
     let mut stmt = conn.prepare(
         "SELECT l.id, l.target_type, l.target_id,
                 COALESCE(a.display_name, w.domain, '(removed)'),
@@ -85,11 +108,11 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
                 l.daily_limit_secs, l.warn_pct, l.action, l.enabled,
                 CASE l.target_type
                   WHEN 'app' THEN (SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions
-                                   WHERE app_id = l.target_id AND day = ?1)
+                                   WHERE app_id = l.target_id AND day IN (?1, ?2))
                   -- A limit on youtube.com also counts m.youtube.com (#8).
                   ELSE (SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
                         JOIN websites w2 ON w2.id = s.website_id
-                        WHERE s.day = ?1 AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
+                        WHERE s.day IN (?1, ?2) AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
                 END,
                 COALESCE(o.extra_secs, 0), COALESCE(o.count, 0), COALESCE(a.exe_path, '')
          FROM usage_limits l
@@ -100,7 +123,7 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
          LEFT JOIN limit_overrides o ON o.limit_id = l.id AND o.day = ?1
          ORDER BY l.id",
     )?;
-    let rows = stmt.query_map(params![day], |r| {
+    let rows = stmt.query_map(params![day, also], |r| {
         Ok(LimitStatus {
             id: r.get(0)?,
             target_type: r.get(1)?,
@@ -128,8 +151,8 @@ pub fn limit_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<LimitS
             l.used_secs = conn.query_row(
                 "SELECT COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
                  JOIN applications a ON a.id = s.app_id
-                 WHERE s.day = ?1 AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
-                params![day, l.target_id, scope],
+                 WHERE s.day IN (?1, ?4) AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
+                params![day, l.target_id, scope, also],
                 |r| r.get(0),
             )?;
         }
@@ -351,8 +374,8 @@ fn check(
     first_reached: &mut HashMap<(i64, i64), NaiveDateTime>,
 ) -> rusqlite::Result<()> {
     let now = now();
-    let day = analytics::fmt_day(now.date());
-    let limits = limit_status(conn, &day)?;
+    let (day, extra) = crate::clock::limit_days(conn, now)?;
+    let limits = limit_status_days(conn, &day, extra.as_deref())?;
 
     if let Ok(mut l) = shared.limited.lock() {
         *l = limits
@@ -435,14 +458,25 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                 }
             };
             let mut first_reached = HashMap::new();
-            let mut day = now().date();
+            let mut day = String::new();
+            let mut watch = crate::clock::Watch::default();
             loop {
                 if shared.shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                if now().date() != day {
-                    day = now().date();
-                    first_reached.clear();
+                if let Some(secs) = watch.observe(chrono::Utc::now(), crate::platform::uptime_ms())
+                {
+                    eprintln!("[limits] system clock moved by {secs} s");
+                    if let Err(e) = crate::clock::record(&conn, now(), secs) {
+                        eprintln!("[limits] could not record the clock change: {e}");
+                    }
+                }
+                match limit_day(&conn, now()) {
+                    Ok(d) if d != day => {
+                        day = d;
+                        first_reached.clear();
+                    }
+                    _ => {}
                 }
                 if let Err(e) = check(&conn, &app, &shared, &mut first_reached) {
                     eprintln!("[limits] check failed: {e}");
@@ -569,6 +603,42 @@ mod tests {
         let with_gap = [(at(9, 0), at(10, 0)), (at(10, 30), at(11, 5))];
         assert!(break_notice(&with_gap, at(11, 5), 60).is_none());
         assert!(break_notice(&spans, at(11, 5), 0).is_none());
+    }
+
+    #[test]
+    fn moving_the_clock_forward_does_not_reset_limits() {
+        let conn = db::open_in_memory().unwrap();
+        let (app, _) =
+            db::get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), at(9, 0)).unwrap();
+        conn.execute(
+            "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action) VALUES ('app', ?1, 1800, 'block')",
+            params![app],
+        )
+        .unwrap();
+        // 20 minutes on the 18th, then the clock is moved forward a day.
+        let id = db::insert_usage(&conn, app, at(9, 0)).unwrap();
+        db::update_span(&conn, db::SpanKind::Usage, id, at(9, 0), at(9, 20)).unwrap();
+        let tomorrow = |h, m| at(h, m) + chrono::Duration::days(1);
+        crate::clock::record(&conn, tomorrow(9, 20), 86_400).unwrap();
+        // 15 more minutes, recorded under the 19th.
+        let id = db::insert_usage(&conn, app, tomorrow(9, 20)).unwrap();
+        db::update_span(
+            &conn,
+            db::SpanKind::Usage,
+            id,
+            tomorrow(9, 20),
+            tomorrow(9, 35),
+        )
+        .unwrap();
+
+        let ls = current_status(&conn, tomorrow(9, 35)).unwrap();
+        assert_eq!(ls[0].used_secs, 35 * 60);
+        assert!(ls[0].exceeded(), "still the real 18th");
+        assert_eq!(limit_day(&conn, tomorrow(9, 35)).unwrap(), "2026-11-18");
+
+        // Real midnight (the clock shows the 20th): a new day, as usual.
+        let next = at(0, 5) + chrono::Duration::days(2);
+        assert_eq!(current_status(&conn, next).unwrap()[0].used_secs, 0);
     }
 
     #[test]

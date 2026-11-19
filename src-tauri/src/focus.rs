@@ -75,7 +75,7 @@ impl FocusPlan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
     Focus,
@@ -283,6 +283,152 @@ fn close_row(
     Ok(())
 }
 
+/// Settings key holding the running session, so it survives a crash or restart (#12).
+const ACTIVE_KEY: &str = "focus_active";
+
+/// What is saved of the running session. The profile is resolved again on resume.
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedFocus {
+    plan: FocusPlan,
+    phase: Phase,
+    round: u32,
+    session_id: i64,
+    start: String,
+    end: String,
+}
+
+/// Saves (or clears) the running session.
+fn persist(conn: &Connection, active: Option<&ActiveFocus>) -> rusqlite::Result<()> {
+    let value = active
+        .and_then(|a| {
+            serde_json::to_string(&SavedFocus {
+                plan: a.plan.clone(),
+                phase: a.phase,
+                round: a.round,
+                session_id: a.session_id,
+                start: db::fmt_time(a.start),
+                end: db::fmt_time(a.end),
+            })
+            .ok()
+        })
+        .unwrap_or_default();
+    db::set_setting(conn, ACTIVE_KEY, &value)
+}
+
+/// Picks up a session that was running when FocusTrack quit, crashed or the PC
+/// restarted, if its plan hasn't finished yet. A phase that ended while
+/// FocusTrack wasn't running keeps only the time it actually saw and counts as
+/// not completed; the schedule then continues from where it is now. Returns the
+/// notification to show.
+pub fn resume(
+    conn: &Connection,
+    shared: &Shared,
+    at: NaiveDateTime,
+) -> rusqlite::Result<Option<(String, String)>> {
+    let Some(raw) = db::get_setting(conn, ACTIVE_KEY)?.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let saved = serde_json::from_str::<SavedFocus>(&raw).ok().and_then(|s| {
+        let start = db::parse_time(&s.start)?;
+        let end = db::parse_time(&s.end)?;
+        Some((s, start, end))
+    });
+    let Some((s, start, end)) = saved.filter(|(s, _, _)| s.plan.validate().is_ok()) else {
+        persist(conn, None)?;
+        return Ok(None);
+    };
+    // A deleted profile means nothing to block; the timer still resumes.
+    let (profile, prev) = match s.plan.profile_id.map(|id| preview(conn, id)) {
+        Some(Ok((p, v))) => (Some(p), Some(v)),
+        _ => (None, None),
+    };
+    let mut active = ActiveFocus {
+        plan: s.plan,
+        profile,
+        preview: prev,
+        phase: s.phase,
+        round: s.round,
+        session_id: s.session_id,
+        start,
+        end,
+        stop_requested: None,
+    };
+    if at >= active.end {
+        let seen: i64 = conn
+            .query_row(
+                "SELECT actual_secs FROM focus_sessions WHERE id = ?1 AND end_time IS NULL",
+                params![active.session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(-1);
+        if seen >= 0 {
+            let seen = seen.clamp(0, (active.end - active.start).num_seconds());
+            close_row(
+                conn,
+                active.session_id,
+                active.start,
+                active.start + Duration::seconds(seen),
+                false,
+            )?;
+        }
+        let (mut phase, mut round, mut phase_end) = (active.phase, active.round, active.end);
+        let (phase, round, mins, from) = loop {
+            let (ph, r, mins) = match next_phase(&active.plan, phase, round) {
+                Next::Done => {
+                    persist(conn, None)?;
+                    return Ok(None);
+                }
+                Next::Break { round, mins } => (Phase::Break, round, mins),
+                Next::Focus { round } => (Phase::Focus, round, active.plan.focus_mins),
+            };
+            let from = phase_end;
+            (phase, round, phase_end) = (ph, r, from + Duration::minutes(mins as i64));
+            if at < phase_end {
+                break (ph, r, mins, from);
+            }
+        };
+        active = begin(
+            conn,
+            active.plan,
+            active.profile,
+            active.preview,
+            phase,
+            round,
+            mins,
+            from,
+        )?;
+    }
+    persist(conn, Some(&active))?;
+    let status = active.status(at);
+    let note = (
+        format!(
+            "{} session resumed",
+            if active.plan.mode == "study" {
+                "Study"
+            } else {
+                "Focus"
+            }
+        ),
+        format!(
+            "\"{}\" picked up where it left off: {} of {}, ends at {}.",
+            active.plan.label,
+            if active.phase == Phase::Break {
+                "break".to_string()
+            } else {
+                format!("round {}", active.round)
+            },
+            active.plan.rounds,
+            status.plan_ends_at.get(11..16).unwrap_or("")
+        ),
+    );
+    apply_blocks(shared, Some(&active));
+    if let Ok(mut f) = shared.focus.lock() {
+        *f = Some(active);
+    }
+    Ok(Some(note))
+}
+
 /// Pushes the session's block lists to the blocker and the browser extension.
 fn apply_blocks(shared: &Shared, active: Option<&ActiveFocus>) {
     let on = active.filter(|a| a.blocking_now());
@@ -378,6 +524,7 @@ pub fn start(conn: &Connection, shared: &Shared, plan: FocusPlan) -> Result<Focu
     let active =
         begin(conn, plan, profile, prev, Phase::Focus, 1, mins, at).map_err(|e| e.to_string())?;
     let status = active.status(at);
+    persist(conn, Some(&active)).map_err(|e| e.to_string())?;
     apply_blocks(shared, Some(&active));
     if let Ok(mut f) = shared.focus.lock() {
         *f = Some(active);
@@ -424,6 +571,7 @@ pub fn stop(conn: &Connection, shared: &Shared, phrase: Option<&str>) -> Result<
     }
     *f = None;
     drop(f);
+    persist(conn, None).map_err(|e| e.to_string())?;
     apply_blocks(shared, None);
     Ok(())
 }
@@ -539,6 +687,7 @@ pub fn tick(
     };
     let current = guard.clone();
     drop(guard);
+    persist(conn, current.as_ref())?;
     apply_blocks(shared, current.as_ref());
     Ok(Some(note))
 }
@@ -644,6 +793,16 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                     return;
                 }
             };
+            match resume(&conn, &shared, now()) {
+                Ok(Some((title, body))) => {
+                    crate::popup::open(&app);
+                    if shared.notifications_enabled.load(Ordering::SeqCst) {
+                        notify(&app, &title, &body);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[focus] could not resume the session: {e}"),
+            }
             let mut ticks: u64 = 0;
             loop {
                 if shared.shutdown.load(Ordering::SeqCst) {
@@ -702,6 +861,113 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    /// Simulates FocusTrack quitting: the in-memory session and blocks are gone.
+    fn restart() -> Shared {
+        Shared::new(false, 300)
+    }
+
+    #[test]
+    fn session_resumes_after_restart() {
+        let conn = db::open_in_memory().unwrap();
+        let shared = Shared::new(false, 300);
+        let p = FocusPlan {
+            profile_id: Some(profile_id(&conn, "Study Mode")),
+            ..plan(1, 0, 0)
+        };
+        start(&conn, &shared, p).unwrap();
+        let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
+
+        let shared = restart();
+        let note = resume(&conn, &shared, t0 + Duration::minutes(10))
+            .unwrap()
+            .expect("resumed");
+        assert_eq!(note.0, "Focus session resumed");
+        let st = status(&shared).expect("running again");
+        assert_eq!((st.phase, st.round), (Phase::Focus, 1));
+        assert_eq!(st.started_at, db::fmt_time(t0), "same timer, not restarted");
+        assert!(st.blocking);
+        assert!(shared
+            .focus_blocklist
+            .lock()
+            .unwrap()
+            .contains(&"youtube.com".to_string()));
+
+        // Finishing normally clears the saved session.
+        tick(&conn, &shared, t0 + Duration::minutes(25), false)
+            .unwrap()
+            .unwrap();
+        assert!(resume(&conn, &restart(), t0 + Duration::minutes(26))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn stopping_clears_the_saved_session() {
+        let conn = db::open_in_memory().unwrap();
+        let shared = Shared::new(false, 300);
+        start(&conn, &shared, plan(1, 0, 0)).unwrap();
+        stop(&conn, &shared, None).unwrap();
+        assert!(resume(&conn, &restart(), now()).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_skips_phases_missed_while_off() {
+        let conn = db::open_in_memory().unwrap();
+        let shared = Shared::new(false, 300);
+        // 25 min focus, 5 min break, 2 rounds.
+        start(&conn, &shared, plan(2, 5, 0)).unwrap();
+        let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
+        tick(&conn, &shared, t0 + Duration::minutes(10), true).unwrap();
+
+        // Off from minute 10 to minute 40: round 2 runs from 30 to 55.
+        let shared = restart();
+        resume(&conn, &shared, t0 + Duration::minutes(40))
+            .unwrap()
+            .expect("resumed");
+        let st = status(&shared).unwrap();
+        assert_eq!((st.phase, st.round), (Phase::Focus, 2));
+        assert_eq!(st.started_at, db::fmt_time(t0 + Duration::minutes(30)));
+
+        // Round 1 keeps only the 10 minutes FocusTrack saw and isn't completed.
+        let (secs, done): (i64, bool) = conn
+            .query_row(
+                "SELECT actual_secs, completed FROM focus_sessions ORDER BY id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((secs, done), (600, false));
+        // The missed break was never recorded.
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM focus_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn plan_that_ended_while_off_is_not_resumed() {
+        let conn = db::open_in_memory().unwrap();
+        let shared = Shared::new(false, 300);
+        start(&conn, &shared, plan(1, 0, 0)).unwrap();
+        let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
+        let shared = restart();
+        assert!(resume(&conn, &shared, t0 + Duration::hours(3))
+            .unwrap()
+            .is_none());
+        assert!(status(&shared).is_none());
+        let open: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM focus_sessions WHERE end_time IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0, "the interrupted round is closed");
+        assert!(resume(&conn, &shared, t0 + Duration::hours(3))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -683,8 +683,7 @@ pub fn get_browser_status(state: State<'_, AppState>) -> BrowserStatus {
 #[tauri::command]
 pub fn get_limits(state: State<'_, AppState>) -> CmdResult<Vec<LimitStatus>> {
     let conn = conn!(state);
-    let today = an::fmt_day(Local::now().date_naive());
-    limits::limit_status(&conn, &today).map_err(err)
+    limits::current_status(&conn, Local::now().naive_local()).map_err(err)
 }
 
 /// Creates or updates the limit for an app or website.
@@ -735,7 +734,7 @@ pub fn set_limit(
 #[tauri::command]
 pub fn override_limit(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let conn = conn!(state);
-    let day = an::fmt_day(Local::now().date_naive());
+    let day = limits::limit_day(&conn, Local::now().naive_local()).map_err(err)?;
     let per_day = db::load_settings(&conn).map_err(err)?.overrides_per_day;
     crate::limits::override_limit(&conn, id, &day, per_day)?;
     // Unblock right away rather than waiting for the next limits check.

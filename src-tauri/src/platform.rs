@@ -14,8 +14,8 @@ pub struct ForegroundApp {
 
 pub use imp::{
     audible_exes, close_windows, controller_idle_seconds, file_description, foreground_app,
-    foreground_pid, idle_seconds, is_elevated, is_session_locked, original_file_name,
-    process_image, processes, run_elevated, terminate,
+    foreground_pid, has_modal_dialog, idle_seconds, is_elevated, is_session_locked,
+    original_file_name, process_image, processes, run_elevated, terminate, uptime_ms,
 };
 
 /// Returns the last path component (`C:\a\b.exe` -> `b.exe`).
@@ -71,15 +71,17 @@ mod imp {
     use windows_sys::Win32::System::StationsAndDesktops::{
         CloseDesktop, OpenInputDesktop, SwitchDesktop,
     };
-    use windows_sys::Win32::System::SystemInformation::GetTickCount;
+    use windows_sys::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetLastInputInfo, IsWindowEnabled, LASTINPUTINFO,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
-        IsWindowVisible, PostMessageW, WM_CLOSE,
+        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
+        IsWindowVisible, PostMessageW, GW_OWNER, WM_CLOSE,
     };
 
     const PROCESS_TERMINATE: u32 = 0x0001;
@@ -152,6 +154,35 @@ mod imp {
             EnumWindows(Some(close_cb), &mut s as *mut CloseSearch as LPARAM);
         }
         s.sent
+    }
+
+    struct ModalSearch {
+        pid: u32,
+        found: bool,
+    }
+
+    unsafe extern "system" fn modal_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let s = &mut *(lparam as *mut ModalSearch);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == s.pid && IsWindowVisible(hwnd) != 0 {
+            let owner = GetWindow(hwnd, GW_OWNER);
+            // A modal dialog disables the window it belongs to.
+            if !owner.is_null() && IsWindowEnabled(owner) == 0 {
+                s.found = true;
+                return 0;
+            }
+        }
+        1
+    }
+
+    /// Whether the process shows a modal dialog, such as "Save changes?".
+    pub fn has_modal_dialog(pid: u32) -> bool {
+        let mut s = ModalSearch { pid, found: false };
+        unsafe {
+            EnumWindows(Some(modal_cb), &mut s as *mut ModalSearch as LPARAM);
+        }
+        s.found
     }
 
     /// Force-closes a process. Used only after `close_windows` was ignored.
@@ -346,6 +377,12 @@ mod imp {
         last.1.map_or(u64::MAX, |t| t.elapsed().as_secs())
     }
 
+    /// Milliseconds since Windows started, including time asleep. Unaffected by
+    /// changes to the system clock.
+    pub fn uptime_ms() -> u64 {
+        unsafe { GetTickCount64() }
+    }
+
     /// Seconds since the last keyboard/mouse input anywhere in the session.
     pub fn idle_seconds() -> u64 {
         unsafe {
@@ -499,6 +536,13 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::ForegroundApp;
+    pub fn uptime_ms() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
     pub fn foreground_app() -> Option<ForegroundApp> {
         None
     }
@@ -534,6 +578,9 @@ mod imp {
     }
     pub fn foreground_pid() -> Option<u32> {
         None
+    }
+    pub fn has_modal_dialog(_pid: u32) -> bool {
+        false
     }
     pub fn close_windows(_pid: u32) -> u32 {
         0
@@ -573,6 +620,44 @@ mod tests {
     fn audible_apps_now() {
         println!("audible: {:?}", audible_exes());
         println!("controller idle: {}", controller_idle_seconds());
+    }
+
+    /// Real check on Windows: a window with a modal dialog open is detected,
+    /// the same window without one isn't. `cargo test modal -- --ignored`
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn modal_dialog_detected() {
+        use std::process::Command;
+        use std::time::Duration;
+        let script = |modal: bool| {
+            format!(
+                "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form;                  $f.Text = 'FT main'; $f.Show(); {}",
+                if modal {
+                    "$d = New-Object System.Windows.Forms.Form; $d.Text = 'Save changes?'; [void]$d.ShowDialog($f)"
+                } else {
+                    "[System.Windows.Forms.Application]::Run($f)"
+                }
+            )
+        };
+        for modal in [true, false] {
+            let mut child = Command::new("powershell")
+                .args(["-NoProfile", "-Command", &script(modal)])
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let mut seen = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(500));
+                if has_modal_dialog(pid) {
+                    seen = true;
+                    break;
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(seen, modal, "modal = {modal}");
+        }
     }
 
     #[test]
