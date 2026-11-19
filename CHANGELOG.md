@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   then asks the app to close again (#13).
 - The productivity summary, reports and insights count browser time by website category, so YouTube is
   Entertainment and GitHub is Development instead of both being neutral (#14).
+- Two different programs with the same file name (two `javaw.exe` or `launcher.exe` from different folders) are
+  no longer merged when you switch between them.
+- "Warn me at" now also warns for limits set to *Block at the limit*, before the app or site is blocked.
+- Deleting data older than N days also removes that period's limit extensions and goal check-offs.
+- Notes are no longer re-saved (and moved to the top) just by opening and leaving them, and a note deleted
+  while an edit was pending isn't saved again.
 
 ### Changed
 - Reorder dashboard sections and side-panel widgets by drag and drop instead of one step at a time with

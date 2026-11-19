@@ -267,7 +267,7 @@ pub fn limit_notices(limits: &[LimitStatus]) -> Vec<Notice> {
                 title,
                 body,
             });
-        } else if l.warned() && l.action != "block" {
+        } else if l.warned() {
             out.push(Notice {
                 key: format!("limit:{}:warn", l.id),
                 title: format!("{}% of your {} limit", l.warn_pct, l.name),
@@ -525,9 +525,10 @@ mod tests {
         let warn = limit_notices(&[limit("website", 2900, 3600, "notify")]);
         assert_eq!(warn[0].key, "limit:7:warn");
         assert!(warn[0].body.contains("48m used of 1h"), "{}", warn[0].body);
-        assert!(
-            limit_notices(&[limit("website", 2900, 3600, "block")]).is_empty(),
-            "block: no early warning"
+        // "Warn me at" applies to every action, including "block at the limit".
+        assert_eq!(
+            limit_notices(&[limit("website", 2900, 3600, "block")])[0].key,
+            "limit:7:warn"
         );
         assert_eq!(
             limit_notices(&[limit("app", 2900, 3600, "warn_then_block")])[0].key,

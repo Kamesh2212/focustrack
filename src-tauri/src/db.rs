@@ -609,6 +609,9 @@ pub fn delete_usage_before(conn: &Connection, day: &str) -> rusqlite::Result<usi
         "DELETE FROM sent_notifications WHERE day < ?1",
         params![day],
     )?;
+    // Old "+15 min" extensions and ticked-off goals are usage history too.
+    conn.execute("DELETE FROM limit_overrides WHERE day < ?1", params![day])?;
+    conn.execute("DELETE FROM goal_checks WHERE day < ?1", params![day])?;
     Ok(a + b + c)
 }
 
@@ -616,6 +619,29 @@ pub fn delete_usage_before(conn: &Connection, day: &str) -> rusqlite::Result<usi
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn deleting_old_data_removes_old_extensions_and_goal_checks() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "INSERT INTO goals (id, kind, target, title) VALUES (1, 'custom', 0, 'Read');
+             INSERT INTO goal_checks (goal_id, day) VALUES (1, '2026-10-01'), (1, '2026-11-18');
+             INSERT INTO limit_overrides (limit_id, day, extra_secs, count)
+               VALUES (1, '2026-10-01', 900, 1), (1, '2026-11-18', 900, 1);",
+        )
+        .unwrap();
+        delete_usage_before(&conn, "2026-11-01").unwrap();
+        let days = |table: &str| -> Vec<String> {
+            conn.prepare(&format!("SELECT day FROM {table} ORDER BY day"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(days("goal_checks"), vec!["2026-11-18"]);
+        assert_eq!(days("limit_overrides"), vec!["2026-11-18"]);
+    }
 
     fn t(h: u32, m: u32, s: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 11, 18)
