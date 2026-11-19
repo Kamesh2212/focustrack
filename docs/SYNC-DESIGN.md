@@ -335,7 +335,7 @@ for hosting.
 
 | # | Question | Proposed answer |
 |---|---|---|
-| Q1 | Hosting and cost ceiling for the official server | Decide before public launch; local-only until then. |
+| Q1 | Hosting and cost ceiling for the official server | **Decided:** the existing Oracle Cloud Always Free ARM VM (4 cores, 24 GB, ~83 GB free disk, UK South) behind its Caddy HTTPS proxy, as a Docker container; £0 until there are customers. Needs: a domain (or free dynamic-DNS name), protection from idle reclaim (Pay As You Go upgrade + £1 budget alert), nightly backups to free Object Storage, an email sender. Estimated capacity: ~5,000 users with 3 devices each. Local-only until the feature works. |
 | Q2 | Social sign-in (Google/Microsoft/Apple)? | Not in v1; email + password + recovery key. |
 | Q3 | Detail window for new devices | 35 days detailed + daily summaries. |
 | Q4 | Sync notes? | Later, opt-in. |

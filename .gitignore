@@ -8,3 +8,7 @@ src-tauri/gen/
 *.db-wal
 *.db-shm
 .claude/
+
+# Sync crates built without CARGO_TARGET_DIR
+crates/*/target/
+server/target/
