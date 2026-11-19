@@ -5,6 +5,7 @@ import { useLoad } from "../lib/hooks";
 import type { Settings as SettingsT, Theme } from "../lib/types";
 import { Button, Card, ConfirmButton, ErrorNote, PageHeader, Segmented, Toggle } from "../components/ui";
 import { InstallSteps, browserLabel, StatusDot, useBrowserStatus } from "../components/ExtensionStatus";
+import { SyncSettings } from "../components/SyncSettings";
 
 const IDLE_OPTIONS = [60, 120, 180, 300, 600, 900, 1800];
 const RETENTION_OPTIONS = [30, 90, 180, 365];
@@ -209,6 +210,8 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
             />
           </Row>
         </Card>
+
+        <SyncSettings />
 
         <Card title="Privacy & data" className="xl:col-span-2">
           <div className="mb-2 flex gap-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600 dark:bg-slate-800/50 dark:text-slate-300">

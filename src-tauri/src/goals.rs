@@ -212,11 +212,21 @@ pub fn toggle_check(conn: &Connection, id: i64, day: &str) -> rusqlite::Result<b
     if removed > 0 {
         return Ok(false);
     }
+    // The same goal ticked on the same day has the same ID on every device.
+    let goal_uuid: Option<String> =
+        conn.query_row("SELECT uuid FROM goals WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })?;
     conn.execute(
-        "INSERT INTO goal_checks (goal_id, day) VALUES (?1, ?2)",
-        params![id, day],
+        "INSERT INTO goal_checks (goal_id, day, uuid) VALUES (?1, ?2, ?3)",
+        params![id, day, goal_uuid.map(|g| check_id(&g, day))],
     )?;
     Ok(true)
+}
+
+/// Stable record ID for "goal `goal_uuid` ticked on `day`".
+pub fn check_id(goal_uuid: &str, day: &str) -> String {
+    focustrack_sync_proto::name_id("goal_check", &format!("{goal_uuid}|{day}"))
 }
 
 #[cfg(test)]

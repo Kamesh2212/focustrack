@@ -21,7 +21,9 @@ mod limits;
 mod notes;
 mod platform;
 mod popup;
+mod profile;
 mod profiles;
+mod sync;
 mod tracker;
 
 use std::path::PathBuf;
@@ -35,6 +37,7 @@ pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub shared: Arc<tracker::Shared>,
     pub data_dir: PathBuf,
+    pub sync: Arc<sync::SyncHandle>,
 }
 
 /// Tray "Pause/Resume tracking" item, kept so its label follows the setting.
@@ -113,11 +116,15 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // A second launch just focuses the running instance (no double tracking).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    // A second launch just focuses the running instance (no double tracking).
+    // Development profiles run side by side as separate devices instead.
+    if profile::name().is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app)
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -127,10 +134,10 @@ pub fn run() {
         .setup(|app| {
             // Administrator mode is on but this copy isn't elevated (e.g. opened
             // from the Start menu): hand over to the administrator copy.
-            if admin::hand_over_if_needed() {
+            if profile::name().is_none() && admin::hand_over_if_needed() {
                 std::process::exit(0);
             }
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = profile::data_dir(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("focustrack.db");
 
@@ -153,14 +160,21 @@ pub fn run() {
             browser::spawn_server(shared.clone(), db_path.clone());
             focus::spawn(app.handle().clone(), db_path.clone(), shared.clone());
             blocker::spawn(app.handle().clone(), shared.clone());
-            limits::spawn(app.handle().clone(), db_path, shared.clone());
+            limits::spawn(app.handle().clone(), db_path.clone(), shared.clone());
+            let sync = sync::SyncHandle::new(data_dir.clone());
+            sync::refresh_status(&sync, &conn);
+            sync::spawn(sync.clone(), db_path, shared.clone());
 
             app.manage(AppState {
                 db: Mutex::new(conn),
                 shared,
                 data_dir,
+                sync,
             });
             build_tray(app, settings.paused)?;
+            if let (Some(name), Some(w)) = (profile::name(), app.get_webview_window("main")) {
+                let _ = w.set_title(&format!("FocusTrack — {name}"));
+            }
 
             // Launched at Windows sign-in: stay in the tray.
             if !std::env::args().any(|a| a == "--minimized") {
@@ -235,6 +249,15 @@ pub fn run() {
             commands::show_main_window,
             commands::enable_admin_mode,
             commands::disable_admin_mode,
+            commands::sync_status,
+            commands::sync_sign_up,
+            commands::sync_sign_in,
+            commands::sync_sign_out,
+            commands::sync_now,
+            commands::sync_set_enabled,
+            commands::sync_devices,
+            commands::sync_remove_device,
+            commands::sync_rename_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

@@ -175,14 +175,152 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v5(conn)?;
     }
 
-    // A focus session left open by a crash or shutdown ends where it was last saved.
+    if version < 6 {
+        migrate_v6(conn)?;
+    }
+
+    // A focus session left open by a crash or shutdown ends where it was last
+    // saved — except the one about to be resumed (#12), which focus.rs handles.
     conn.execute(
         "UPDATE focus_sessions
          SET end_time = strftime('%Y-%m-%d %H:%M:%S', start_time, '+' || actual_secs || ' seconds')
-         WHERE end_time IS NULL",
+         WHERE end_time IS NULL
+           AND id IS NOT (SELECT json_extract(value, '$.session_id') FROM user_settings
+                          WHERE key = 'focus_active' AND value != '')",
         [],
     )?;
     Ok(())
+}
+
+/// Tables whose rows belong to the device that recorded them.
+pub const OWNED_TABLES: &[&str] = &[
+    "usage_sessions",
+    "idle_periods",
+    "website_sessions",
+    "focus_sessions",
+];
+/// Tables any device may edit; the newest edit (by `hlc`) wins.
+pub const SHARED_TABLES: &[&str] = &["usage_limits", "goals", "goal_checks"];
+
+/// SQL for "this device's ID".
+pub const OWN_DEVICE: &str = "(SELECT value FROM user_settings WHERE key = 'device_id')";
+
+/// A random UUID (v4) in SQL.
+const SQL_UUID: &str = "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || \
+    substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || \
+    substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))";
+
+/// A hybrid-logical-clock stamp in SQL: never behind the newest stamp seen
+/// from other devices (`hlc_seen`), see sync-proto `hlc`.
+fn sql_hlc() -> String {
+    format!(
+        "printf('%d:0:%s', max(CAST(unixepoch('subsec') * 1000 AS INTEGER), \
+         COALESCE((SELECT CAST(value AS INTEGER) FROM user_settings WHERE key = 'hlc_seen'), 0) + 1), {OWN_DEVICE})"
+    )
+}
+
+/// True while the sync engine applies other devices' changes (no version bumps, no tombstones).
+const NOT_APPLYING: &str =
+    "(SELECT value FROM user_settings WHERE key = 'sync_applying') IS NOT '1'";
+
+/// Schema v6 (#56): every syncable row gets a UUID, the device that wrote it,
+/// and a version; shared rows also get a hybrid logical clock. Triggers keep
+/// these up to date, so the rest of the app writes rows exactly as before.
+fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
+    if get_setting(conn, "device_id")?.is_none() {
+        set_setting(conn, "device_id", &focustrack_sync_proto::new_id())?;
+    }
+    let hlc = sql_hlc();
+    let mut sql = String::from(
+        "BEGIN;
+         CREATE TABLE IF NOT EXISTS devices (
+             id        TEXT PRIMARY KEY,
+             name      TEXT NOT NULL DEFAULT '',
+             platform  TEXT NOT NULL DEFAULT '',
+             app_version TEXT NOT NULL DEFAULT '',
+             last_seen TEXT
+         );
+         CREATE TABLE IF NOT EXISTS sync_tombstones (
+             uuid    TEXT PRIMARY KEY,
+             kind    TEXT NOT NULL,
+             day     TEXT NOT NULL,
+             hlc     TEXT NOT NULL,
+             version INTEGER NOT NULL,
+             synced  INTEGER NOT NULL DEFAULT 0
+         );",
+    );
+    for (table, shared) in OWNED_TABLES
+        .iter()
+        .map(|t| (*t, false))
+        .chain(SHARED_TABLES.iter().map(|t| (*t, true)))
+    {
+        sql += &format!(
+            "ALTER TABLE {table} ADD COLUMN uuid TEXT;
+             ALTER TABLE {table} ADD COLUMN device_id TEXT;
+             ALTER TABLE {table} ADD COLUMN version INTEGER;
+             ALTER TABLE {table} ADD COLUMN synced_version INTEGER NOT NULL DEFAULT 0;
+             UPDATE {table} SET uuid = {SQL_UUID}, device_id = {OWN_DEVICE}, version = 1;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid);
+             CREATE INDEX IF NOT EXISTS idx_{table}_pending ON {table}(device_id, version, synced_version);"
+        );
+        let extra_ins = if shared {
+            format!(", hlc = COALESCE(NEW.hlc, {hlc})")
+        } else {
+            String::new()
+        };
+        let extra_upd = if shared {
+            format!(", hlc = {hlc}, device_id = {OWN_DEVICE}")
+        } else {
+            String::new()
+        };
+        if shared {
+            sql += &format!(
+                "ALTER TABLE {table} ADD COLUMN hlc TEXT; UPDATE {table} SET hlc = {hlc};"
+            );
+        }
+        sql += &format!(
+            "CREATE TRIGGER IF NOT EXISTS {table}_sync_ins AFTER INSERT ON {table}
+               WHEN NEW.uuid IS NULL OR NEW.device_id IS NULL OR NEW.version IS NULL
+             BEGIN
+               UPDATE {table} SET uuid = COALESCE(NEW.uuid, {SQL_UUID}),
+                   device_id = COALESCE(NEW.device_id, {OWN_DEVICE}),
+                   version = COALESCE(NEW.version, 1){extra_ins}
+               WHERE rowid = NEW.rowid;
+             END;
+             CREATE TRIGGER IF NOT EXISTS {table}_sync_upd AFTER UPDATE ON {table}
+               WHEN NEW.version IS OLD.version AND NEW.synced_version IS OLD.synced_version AND {NOT_APPLYING}
+             BEGIN
+               UPDATE {table} SET version = OLD.version + 1{extra_upd} WHERE rowid = NEW.rowid;
+             END;"
+        );
+        if shared {
+            let kind = match table {
+                "usage_limits" => "limit",
+                "goals" => "goal",
+                _ => "goal_check",
+            };
+            sql += &format!(
+                "CREATE TRIGGER IF NOT EXISTS {table}_sync_del AFTER DELETE ON {table}
+                   WHEN OLD.uuid IS NOT NULL AND {NOT_APPLYING}
+                 BEGIN
+                   INSERT OR REPLACE INTO sync_tombstones (uuid, kind, day, hlc, version, synced)
+                   VALUES (OLD.uuid, '{kind}', date('now', 'localtime'), {hlc}, COALESCE(OLD.version, 1) + 1, 0);
+                 END;"
+            );
+        }
+    }
+    // History older than 35 days isn't uploaded (design D7); mark it as synced.
+    for table in OWNED_TABLES {
+        sql += &format!(
+            "UPDATE {table} SET synced_version = version WHERE day < date('now', 'localtime', '-35 days');"
+        );
+    }
+    sql += "PRAGMA user_version = 6; COMMIT;";
+    let result = conn.execute_batch(&sql);
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    result
 }
 
 /// Study category and mode, limit actions/overrides, custom goals, blocking
@@ -620,6 +758,180 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
+    fn row(conn: &Connection, table: &str, rowid: i64) -> (String, String, i64, i64) {
+        conn.query_row(
+            &format!(
+                "SELECT uuid, device_id, version, synced_version FROM {table} WHERE rowid = ?1"
+            ),
+            params![rowid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn startup_cleanup_leaves_the_session_being_resumed_open() {
+        let conn = open_in_memory().unwrap();
+        for id in [5, 6] {
+            conn.execute(
+                "INSERT INTO focus_sessions (id, label, kind, planned_secs, day, start_time, actual_secs)
+                 VALUES (?1, 'Study', 'focus', 1500, '2026-11-19', '2026-11-19 09:00:00', 300)",
+                params![id],
+            )
+            .unwrap();
+        }
+        set_setting(&conn, "focus_active", r#"{"session_id":5}"#).unwrap();
+        migrate(&conn).unwrap(); // what every start-up does
+        let open: Vec<i64> = conn
+            .prepare("SELECT id FROM focus_sessions WHERE end_time IS NULL")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            open,
+            vec![5],
+            "the crashed session 6 is closed; 5 will resume"
+        );
+    }
+
+    #[test]
+    fn v6_rows_get_ids_and_versions_automatically() {
+        let conn = open_in_memory().unwrap();
+        let me = get_setting(&conn, "device_id").unwrap().unwrap();
+        let (app, _) =
+            get_or_create_app(&conn, "code.exe", "", || "Code".into(), t(9, 0, 0)).unwrap();
+        let id = insert_usage(&conn, app, t(9, 0, 0)).unwrap();
+        let (uuid, dev, v, synced) = row(&conn, "usage_sessions", id);
+        assert_eq!(
+            (uuid.len(), dev.as_str(), v, synced),
+            (36, me.as_str(), 1, 0)
+        );
+
+        // Every change bumps the version; marking it synced doesn't.
+        update_span(&conn, SpanKind::Usage, id, t(9, 0, 0), t(9, 5, 0)).unwrap();
+        update_span(&conn, SpanKind::Usage, id, t(9, 0, 0), t(9, 6, 0)).unwrap();
+        assert_eq!(row(&conn, "usage_sessions", id).2, 3);
+        conn.execute(
+            "UPDATE usage_sessions SET synced_version = 3 WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        assert_eq!(row(&conn, "usage_sessions", id).2, 3);
+        // Changes applied from other devices (sync_applying) keep their own version.
+        set_setting(&conn, "sync_applying", "1").unwrap();
+        conn.execute(
+            "UPDATE usage_sessions SET duration_secs = 1 WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        set_setting(&conn, "sync_applying", "0").unwrap();
+        assert_eq!(row(&conn, "usage_sessions", id).2, 3);
+        assert_eq!(
+            row(&conn, "usage_sessions", id).0,
+            uuid,
+            "the id never changes"
+        );
+    }
+
+    #[test]
+    fn v6_shared_rows_get_a_clock_and_leave_tombstones() {
+        let conn = open_in_memory().unwrap();
+        let (app, _) =
+            get_or_create_app(&conn, "steam.exe", "", || "Steam".into(), t(9, 0, 0)).unwrap();
+        conn.execute(
+            "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action) VALUES ('app', ?1, 3600, 'block')",
+            params![app],
+        )
+        .unwrap();
+        let hlc1: String = conn
+            .query_row("SELECT hlc FROM usage_limits", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            focustrack_sync_proto::hlc::Hlc::parse(&hlc1).is_some(),
+            "{hlc1}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        conn.execute("UPDATE usage_limits SET daily_limit_secs = 1800", [])
+            .unwrap();
+        let hlc2: String = conn
+            .query_row("SELECT hlc FROM usage_limits", [], |r| r.get(0))
+            .unwrap();
+        assert!(focustrack_sync_proto::hlc::newer(&hlc2, &hlc1));
+
+        let uuid: String = conn
+            .query_row("SELECT uuid FROM usage_limits", [], |r| r.get(0))
+            .unwrap();
+        conn.execute("DELETE FROM usage_limits", []).unwrap();
+        let (kind, v): (String, i64) = conn
+            .query_row(
+                "SELECT kind, version FROM sync_tombstones WHERE uuid = ?1",
+                params![uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), v), ("limit", 3));
+    }
+
+    /// Real upgrade check: `FT_DB_COPY=<copy of a real database> cargo test upgrade_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn upgrade_real_database_copy() {
+        let path = std::env::var("FT_DB_COPY").unwrap();
+        let before: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM usage_sessions", [], |r| r.get(0))
+            .unwrap();
+        let conn = open(Path::new(&path)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let (rows, with_ids, pending): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(uuid), SUM(version > synced_version) FROM usage_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        println!("schema v{v}: {rows} usage rows (before {before}), {with_ids} with ids, {pending} to upload");
+        assert_eq!((v, rows, with_ids), (6, before, before));
+    }
+
+    #[test]
+    fn upgrading_to_v6_keeps_data_and_skips_old_history() {
+        let path =
+            std::env::temp_dir().join(format!("ft-v6-{}.db", focustrack_sync_proto::new_id()));
+        {
+            let conn = open(&path).unwrap();
+            let (app, _) =
+                get_or_create_app(&conn, "code.exe", "", || "Code".into(), t(9, 0, 0)).unwrap();
+            insert_usage(&conn, app, t(9, 0, 0)).unwrap();
+            // Pretend it's a v5 database with an old row: drop the v6 columns' meaning by re-running.
+            conn.execute(
+                "UPDATE usage_sessions SET day = '2020-01-01', synced_version = 0",
+                [],
+            )
+            .unwrap();
+        }
+        // Re-opening runs migrations again: idempotent, nothing breaks.
+        let conn = open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 6);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_sessions WHERE uuid IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn deleting_old_data_removes_old_extensions_and_goal_checks() {
         let conn = open_in_memory().unwrap();
@@ -661,7 +973,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
         let profiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
             .unwrap();

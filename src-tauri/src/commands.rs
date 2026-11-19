@@ -673,7 +673,7 @@ pub fn get_browser_status(state: State<'_, AppState>) -> BrowserStatus {
     browsers.sort_by_key(|b| b.last_seen_secs);
     BrowserStatus {
         server_running: state.shared.server_running.load(Ordering::SeqCst),
-        port: browser::PORT,
+        port: crate::profile::api_port(),
         browsers,
     }
 }
@@ -1230,4 +1230,98 @@ pub async fn disable_admin_mode(app: AppHandle) -> CmdResult<()> {
         crate::quit(&app);
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ sync
+
+/// Runs `f` on a fresh database connection off the main thread (network calls
+/// and key derivation take a moment; the app stays responsive).
+async fn with_sync<T: Send + 'static>(
+    state: &State<'_, AppState>,
+    f: impl FnOnce(&crate::sync::SyncHandle, &rusqlite::Connection) -> Result<T, String>
+        + Send
+        + 'static,
+) -> CmdResult<T> {
+    let handle = state.sync.clone();
+    let path = state.data_dir.join("focustrack.db");
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open(&path).map_err(|e| e.to_string())?;
+        let out = f(&handle, &conn);
+        crate::sync::refresh_status(&handle, &conn);
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn sync_status(state: State<'_, AppState>) -> crate::sync::SyncStatus {
+    state.sync.status()
+}
+
+/// Creates an account; returns the recovery key (shown once).
+#[tauri::command]
+pub async fn sync_sign_up(
+    state: State<'_, AppState>,
+    server: String,
+    email: String,
+    password: String,
+    device_name: String,
+) -> CmdResult<String> {
+    with_sync(&state, move |h, c| {
+        crate::sync::sign_up(
+            h,
+            c,
+            &server,
+            &email,
+            &password,
+            &device_name,
+            focustrack_sync_proto::crypto::KdfParams::standard(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_sign_in(
+    state: State<'_, AppState>,
+    server: String,
+    email: String,
+    password: String,
+    device_name: String,
+) -> CmdResult<()> {
+    with_sync(&state, move |h, c| {
+        crate::sync::sign_in(h, c, &server, &email, &password, &device_name)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_sign_out(state: State<'_, AppState>) -> CmdResult<()> {
+    with_sync(&state, crate::sync::sign_out).await
+}
+
+#[tauri::command]
+pub fn sync_now(state: State<'_, AppState>) {
+    state.sync.wake();
+}
+
+#[tauri::command]
+pub async fn sync_set_enabled(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    with_sync(&state, move |h, c| crate::sync::set_enabled(h, c, enabled)).await
+}
+
+#[tauri::command]
+pub async fn sync_devices(state: State<'_, AppState>) -> CmdResult<Vec<crate::sync::DeviceRow>> {
+    with_sync(&state, crate::sync::devices).await
+}
+
+#[tauri::command]
+pub async fn sync_remove_device(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    with_sync(&state, move |h, c| crate::sync::remove_device(h, c, &id)).await
+}
+
+#[tauri::command]
+pub async fn sync_rename_device(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    with_sync(&state, move |h, c| crate::sync::rename_device(h, c, &name)).await
 }

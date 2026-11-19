@@ -332,11 +332,30 @@ pub fn active_spans(
     from: &str,
     to: &str,
 ) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
+    spans(conn, from, to, false)
+}
+
+/// Active spans recorded on this device only (break reminders, live checks).
+pub fn own_active_spans(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
+    spans(conn, from, to, true)
+}
+
+fn spans(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+    own: bool,
+) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
     let mut stmt = conn.prepare(
         "SELECT start_time, end_time FROM usage_sessions
-         WHERE day BETWEEN ?1 AND ?2 AND duration_secs > 0 ORDER BY start_time",
+         WHERE day BETWEEN ?1 AND ?2 AND duration_secs > 0
+           AND (?3 = 0 OR device_id = (SELECT value FROM user_settings WHERE key = 'device_id')) ORDER BY start_time",
     )?;
-    let rows = stmt.query_map(params![from, to], |r| {
+    let rows = stmt.query_map(params![from, to, own], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
     let mut out = Vec::new();

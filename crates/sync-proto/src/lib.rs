@@ -110,6 +110,18 @@ pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// A stable ID derived from a name, so every device computes the same ID for
+/// the same thing (e.g. "goal X ticked on day Y").
+pub fn name_id(namespace: &str, name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(format!("focustrack:{namespace}:{name}").as_bytes());
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    b[6] = (b[6] & 0x0f) | 0x80; // version 8: custom
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    uuid::Uuid::from_bytes(b).to_string()
+}
+
 /// Checks the parts of an envelope a server can check without the key.
 pub fn validate(env: &Envelope) -> Result<(), String> {
     uuid::Uuid::parse_str(&env.id).map_err(|_| "bad record id")?;
@@ -180,6 +192,14 @@ mod tests {
             ..env(kind::LIMIT)
         })
         .is_ok());
+    }
+
+    #[test]
+    fn name_ids_are_stable_and_valid() {
+        let a = name_id("goal_check", "g1|2026-11-19");
+        assert_eq!(a, name_id("goal_check", "g1|2026-11-19"));
+        assert_ne!(a, name_id("goal_check", "g1|2026-11-20"));
+        assert!(uuid::Uuid::parse_str(&a).is_ok());
     }
 
     #[test]

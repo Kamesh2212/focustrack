@@ -299,6 +299,19 @@ Everything can be built and tested on one PC without pushing anything:
    removed device, wrong password, recovery key.
 4. **Android (later):** an emulator talking to the server on the host (`10.0.2.2:8787`).
 
+**How to run it today** (PowerShell, from the repository root, `CARGO_TARGET_DIR` set as in the README):
+
+```powershell
+cd server; $env:FT_SYNC_DB="dev-sync.db"; cargo run          # sync server on 127.0.0.1:8787
+npm run dev                                                    # UI dev server (both copies load it)
+cd src-tauri; cargo build
+$env:FOCUSTRACK_PROFILE="laptop1"; & "$env:CARGO_TARGET_DIR\debug\focustrack.exe"
+$env:FOCUSTRACK_PROFILE="laptop2"; $env:FOCUSTRACK_API_PORT="17867"; & "$env:CARGO_TARGET_DIR\debug\focustrack.exe"
+```
+
+In each copy: Settings → Account & Sync → create an account in one, sign in to the same account in the other.
+Profiles keep their data in `%APPDATA%\com.focustrack.app\profiles\<name>`; the normal installed app is untouched.
+
 ## 12. Implementation order
 
 1. `crates/sync-proto`: envelope, record bodies, key derivation, encrypt/decrypt + tests.

@@ -158,6 +158,30 @@ export interface Settings {
   dashboardLayout: string;
 }
 
+/** Multi-device sync status (Settings → Account & Sync). */
+export interface SyncStatus {
+  signedIn: boolean;
+  enabled: boolean;
+  email: string | null;
+  server: string | null;
+  deviceId: string;
+  deviceName: string;
+  state: "off" | "idle" | "syncing" | "error" | "signed_out";
+  lastSync: string | null;
+  lastError: string | null;
+  pending: number;
+  otherDevices: number;
+}
+
+export interface SyncDevice {
+  id: string;
+  name: string;
+  platform: string;
+  appVersion: string;
+  lastSeen: string | null;
+  current: boolean;
+}
+
 export interface AdminMode {
   elevated: boolean;
   enabled: boolean;

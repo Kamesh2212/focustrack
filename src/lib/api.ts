@@ -25,6 +25,8 @@ import type {
   SessionRow,
   Settings,
   SiteUsage,
+  SyncDevice,
+  SyncStatus,
   Theme,
 } from "./types";
 import { mock } from "./mock";
@@ -90,6 +92,18 @@ export const api = {
   showMainWindow: () => call<void>("show_main_window"),
   enableAdminMode: () => call<void>("enable_admin_mode"),
   disableAdminMode: () => call<void>("disable_admin_mode"),
+  syncStatus: () => call<SyncStatus>("sync_status"),
+  /** Returns the recovery key, to show once. */
+  syncSignUp: (server: string, email: string, password: string, deviceName: string) =>
+    call<string>("sync_sign_up", { server, email, password, deviceName }),
+  syncSignIn: (server: string, email: string, password: string, deviceName: string) =>
+    call<void>("sync_sign_in", { server, email, password, deviceName }),
+  syncSignOut: () => call<void>("sync_sign_out"),
+  syncNow: () => call<void>("sync_now"),
+  syncSetEnabled: (enabled: boolean) => call<void>("sync_set_enabled", { enabled }),
+  syncDevices: () => call<SyncDevice[]>("sync_devices"),
+  syncRemoveDevice: (id: string) => call<void>("sync_remove_device", { id }),
+  syncRenameDevice: (name: string) => call<void>("sync_rename_device", { name }),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

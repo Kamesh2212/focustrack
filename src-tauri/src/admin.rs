@@ -88,7 +88,7 @@ pub fn restart_normal() {
 /// Asks a running FocusTrack (on the local API) to show its window.
 pub fn ask_running_copy_to_show() -> bool {
     let Ok(mut s) = TcpStream::connect_timeout(
-        &([127, 0, 0, 1], crate::browser::PORT).into(),
+        &([127, 0, 0, 1], crate::profile::api_port()).into(),
         Duration::from_millis(500),
     ) else {
         return false;
@@ -96,7 +96,7 @@ pub fn ask_running_copy_to_show() -> bool {
     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
     let req = format!(
         "POST /v1/show HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-FocusTrack: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        crate::browser::PORT
+        crate::profile::api_port()
     );
     if s.write_all(req.as_bytes()).is_err() {
         return false;

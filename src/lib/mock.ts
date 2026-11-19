@@ -21,6 +21,7 @@ import type {
   Note,
   Profile,
   Resource,
+  SyncStatus,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -131,6 +132,20 @@ let notes: Note[] = [
   { id: 3, notebook: "Quick notes", title: "Email Prof. about deadline", body: "Email Prof. about deadline", focusSessionId: null, sessionLabel: null, createdAt: `${today()} 11:00:00`, updatedAt: `${today()} 11:00:00` },
 ];
 let nextNoteId = 4;
+
+const sync: SyncStatus = {
+  signedIn: false,
+  enabled: false,
+  email: null,
+  server: null,
+  deviceId: "d1",
+  deviceName: "Home PC",
+  state: "off",
+  lastSync: null,
+  lastError: null,
+  pending: 0,
+  otherDevices: 0,
+};
 
 let resources: Resource[] = [
   { id: 1, title: "Google Scholar", url: "https://scholar.google.com", subject: null },
@@ -515,6 +530,35 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "open_url":
         window.open(String(a.url), "_blank", "noopener");
+        return null;
+      case "sync_status":
+        return { ...sync };
+      case "sync_sign_up":
+      case "sync_sign_in": {
+        if (!String(a.email).includes("@")) throw new Error("Enter a valid email address");
+        if (cmd === "sync_sign_up" && String(a.password).length < 10) throw new Error("Use a password of at least 10 characters");
+        Object.assign(sync, { signedIn: true, enabled: true, email: a.email, server: a.server, deviceName: a.deviceName, state: "idle", lastSync: new Date().toISOString().slice(0, 19).replace("T", " "), otherDevices: 1 });
+        return cmd === "sync_sign_up" ? "FT1-7K3M-QX9P-2HDW-V8RT-NC4J-6YBF-ZA1E-5GKS-0PWM-3TQV-H7XD-9RNC-JB2-4F8" : null;
+      }
+      case "sync_sign_out":
+        Object.assign(sync, { signedIn: false, enabled: false, email: null, state: "off", otherDevices: 0 });
+        return null;
+      case "sync_now":
+        sync.lastSync = new Date().toISOString().slice(0, 19).replace("T", " ");
+        return null;
+      case "sync_set_enabled":
+        Object.assign(sync, { enabled: a.enabled, state: a.enabled ? "idle" : "off" });
+        return null;
+      case "sync_devices":
+        return [
+          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), current: true },
+          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), current: false },
+        ];
+      case "sync_remove_device":
+        sync.otherDevices = 0;
+        return null;
+      case "sync_rename_device":
+        sync.deviceName = String(a.name);
         return null;
       case "get_admin_mode":
         return { elevated: false, enabled: false, needsAdmin: ["Genshin Impact"] };
