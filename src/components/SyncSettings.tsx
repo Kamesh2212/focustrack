@@ -152,7 +152,10 @@ function SignInForm({ status, onSignedIn }: { status: SyncStatus; onSignedIn: (r
         <details className="text-sm">
           <summary className="cursor-pointer text-slate-500">Server</summary>
           <input value={server} onChange={(e) => setServer(e.target.value)} className={cx(field, "mt-1.5 font-mono")} />
-          <p className="mt-1 text-xs text-slate-500">For now, sync uses a FocusTrack server running on this computer.</p>
+          <p className="mt-1 text-xs text-slate-500">
+            The FocusTrack sync server you run yourself: <code>http://127.0.0.1:8787</code> on the computer running it, or its
+            home-network address (e.g. <code>http://192.168.1.20:8787</code>) from your other devices.
+          </p>
         </details>
         <ErrorNote error={error} />
         <button

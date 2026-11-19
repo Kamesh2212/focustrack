@@ -4,7 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [1.2.0] - 2026-11-19
+
+Pre-release for testing. Multi-device sync and the Android app are **previews**: sync needs a FocusTrack sync
+server that you run yourself (see [docs/SYNC-SETUP.md](docs/SYNC-SETUP.md)).
+
+### Added
+- **Multi-device sync (preview)**: sign in under Settings → Account & Sync to combine screen time from all your
+  devices. End-to-end encrypted: devices encrypt everything before upload and the server can't read it. Create an
+  account (you get a recovery key), sign in on your other devices, rename or remove devices, sign out.
+- **All Devices dashboard and reports**: filter by all devices, computers, phones or one device; combined and
+  *unique* screen time (time on two devices at once counted once); time per device and how recent its data is.
+- **Android app (preview)**: screen time from Android's Usage access, imported in the app and in the background
+  about every 15 minutes, synced with your computers; phone-friendly layout. No app blocking on Android yet.
+- **FocusTrack sync server** (`focustrack-server`) to run on your own computer or server.
+
 
 ### Fixed
 - Focus and study sessions survive a crash, restart or quitting FocusTrack: the session and its blocking pick up
@@ -23,6 +37,7 @@ All notable changes to this project are documented here. The format follows
   while an edit was pending isn't saved again.
 
 ### Changed
+- Database schema v6 (records get IDs and device tags for sync); upgrades automatically.
 - Reorder dashboard sections and side-panel widgets by drag and drop instead of one step at a time with
   arrows. The drag handle also moves an item with the arrow keys.
 
@@ -78,5 +93,6 @@ First public release.
 ### Known issues
 - See [docs/AUDIT-1.0.0.md](docs/AUDIT-1.0.0.md) and the issue tracker.
 
+[1.2.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.0.0

@@ -1281,12 +1281,28 @@ fn finish_sign_in(
     Ok(())
 }
 
+/// Whether an `http://` address stays on this computer or the home network
+/// (127.x, localhost, 10.x, 172.16–31.x, 192.168.x), where a self-hosted test
+/// server can run without a certificate. Everything else needs https.
+fn local_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    if host == "localhost" {
+        return true;
+    }
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_private(),
+        Err(_) => false,
+    }
+}
+
 fn check_server(server: &str) -> Result<String, String> {
     let s = server.trim().trim_end_matches('/').to_string();
-    let local = s.starts_with("http://127.0.0.1") || s.starts_with("http://localhost");
-    if !(s.starts_with("https://") || local) {
+    if !(s.starts_with("https://") || local_http(&s)) {
         return Err(
-            "The server address must start with https:// (http is only allowed for this computer)"
+            "The server address must start with https:// (http is only allowed for this computer              or your home network, e.g. http://192.168.1.20:8787)"
                 .into(),
         );
     }
@@ -1792,6 +1808,29 @@ mod tests {
             println!("signed in");
         }
         println!("device {}", device_id(&conn).unwrap());
+    }
+
+    #[test]
+    fn plain_http_only_for_this_computer_and_the_home_network() {
+        for ok in [
+            "https://sync.example.com",
+            "http://127.0.0.1:8787",
+            "http://localhost:8787/",
+            "http://192.168.1.20:8787",
+            "http://10.0.0.5:8787",
+            "http://172.20.1.2",
+        ] {
+            assert!(check_server(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://sync.example.com",
+            "http://8.8.8.8:8787",
+            "http://172.32.0.1",
+            "http://192.168.1.20.evil.com",
+            "ftp://192.168.1.2",
+        ] {
+            assert!(check_server(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
