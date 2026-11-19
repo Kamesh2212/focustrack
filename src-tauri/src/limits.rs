@@ -108,11 +108,13 @@ fn limit_status_days(
                 l.daily_limit_secs, l.warn_pct, l.action, l.enabled,
                 CASE l.target_type
                   WHEN 'app' THEN (SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions
-                                   WHERE app_id = l.target_id AND day IN (?1, ?2))
+                                   WHERE app_id = l.target_id AND day IN (?1, ?2)
+                                     AND device_id = (SELECT value FROM user_settings WHERE key = 'device_id'))
                   -- A limit on youtube.com also counts m.youtube.com (#8).
                   ELSE (SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
                         JOIN websites w2 ON w2.id = s.website_id
-                        WHERE s.day IN (?1, ?2) AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
+                        WHERE s.day IN (?1, ?2) AND s.device_id = (SELECT value FROM user_settings WHERE key = 'device_id')
+                          AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
                 END,
                 COALESCE(o.extra_secs, 0), COALESCE(o.count, 0), COALESCE(a.exe_path, '')
          FROM usage_limits l
@@ -151,7 +153,8 @@ fn limit_status_days(
             l.used_secs = conn.query_row(
                 "SELECT COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
                  JOIN applications a ON a.id = s.app_id
-                 WHERE s.day IN (?1, ?4) AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
+                 WHERE s.day IN (?1, ?4) AND s.device_id = (SELECT value FROM user_settings WHERE key = 'device_id')
+                   AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
                 params![day, l.target_id, scope, also],
                 |r| r.get(0),
             )?;
@@ -432,7 +435,8 @@ fn check(
     }
     let settings = db::load_settings(conn)?;
     notices.extend(goal_reminder(&goals, now, &settings.goal_reminder));
-    let spans = analytics::active_spans(conn, &day, &day)?;
+    // Break reminders are about this computer, not the phone.
+    let spans = analytics::own_active_spans(conn, &day, &day)?;
     notices.extend(break_notice(
         &spans,
         now,

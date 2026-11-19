@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::thread;
 use tiny_http::{Header, Method, Request, Response, Server};
 
-pub const PORT: u16 = 17865;
 /// A report older than this is ignored (extensions resend every 30 s).
 pub const FRESH_SECS: i64 = 75;
 pub const BROWSERS: &[&str] = &["chrome", "edge", "brave", "firefox", "opera", "vivaldi"];
@@ -239,8 +238,10 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
     let origin = header(&req, "Origin");
     let origin_ok = origin_allowed(origin.as_deref());
     let cors = cors_origin(origin.as_deref());
-    let host_ok = header(&req, "Host")
-        .is_some_and(|h| h == format!("127.0.0.1:{PORT}") || h == format!("localhost:{PORT}"));
+    let host_ok = header(&req, "Host").is_some_and(|h| {
+        let port = crate::profile::api_port();
+        h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
+    });
     #[cfg(debug_assertions)]
     eprintln!(
         "[browser] {} {} origin={:?} ok={}",
@@ -472,10 +473,11 @@ pub fn spawn_server(shared: Arc<Shared>, db_path: std::path::PathBuf) {
     thread::Builder::new()
         .name("focustrack-browser-api".into())
         .spawn(move || {
-            let server = match Server::http(("127.0.0.1", PORT)) {
+            let port = crate::profile::api_port();
+            let server = match Server::http(("127.0.0.1", port)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[browser] cannot listen on 127.0.0.1:{PORT}: {e}");
+                    eprintln!("[browser] cannot listen on 127.0.0.1:{port}: {e}");
                     return;
                 }
             };
@@ -513,7 +515,7 @@ mod tests {
             let _ = s.read_to_string(&mut out);
             out
         };
-        let host = format!("Host: 127.0.0.1:{PORT}");
+        let host = format!("Host: 127.0.0.1:{}", crate::profile::api_port());
         let get = |origin: &str, extra: &str| {
             send(&format!(
                 "GET /v1/summary HTTP/1.1\r\n{host}\r\n{origin}{extra}Connection: close\r\n\r\n"

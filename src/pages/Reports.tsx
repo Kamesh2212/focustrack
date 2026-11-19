@@ -7,12 +7,14 @@ import { CategoryDonut, DailyChart, Heatmap, HourlyChart, ProductivityChart } fr
 import { InsightList } from "../components/Insights";
 import { AppList } from "../components/AppList";
 import { SiteList } from "../components/SiteList";
+import { DeviceBreakdown, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
 
 export default function Reports() {
   const [range, setRange] = useState<RangeKey>("7d");
   const [custom, setCustom] = useState(rangeFor("7d"));
   const { from, to } = rangeFor(range, custom);
-  const { data: r, error } = useLoad(() => api.report(from, to), [from, to]);
+  const [device, setDevice] = useDeviceFilter();
+  const { data: r, error } = useLoad(() => api.report(from, to, device), [from, to, device]);
   const insights = useLoad(() => api.insights(), []);
 
   const change = r ? pctChange(r.activeSecs, r.prevActiveSecs) : null;
@@ -26,6 +28,7 @@ export default function Reports() {
         subtitle={multiDay ? `${dayLabel(from)} – ${dayLabel(to)}` : dayLabel(from)}
         actions={
           <>
+            {r && <DevicePicker devices={r.devices} value={device} onChange={setDevice} />}
             <RangePicker value={range} onChange={setRange} keys={["today", "yesterday", "7d", "30d", "custom"]} />
             {range === "custom" && (
               <div className="flex items-center gap-1.5 text-sm">
@@ -47,7 +50,15 @@ export default function Reports() {
               hint={change === null ? "No previous period data" : `${change > 0 ? "▲" : change < 0 ? "▼" : ""} ${Math.abs(change)}% vs previous period`}
               tone={change === null ? "default" : change > 0 ? "bad" : "good"}
             />
-            <Stat label="Idle time" value={fmtDuration(r.idleSecs)} hint={`Screen time ${fmtDuration(r.activeSecs + r.idleSecs)}`} />
+            <Stat
+              label="Idle time"
+              value={fmtDuration(r.idleSecs)}
+              hint={
+                hasSeveral(r.devices) && r.uniqueActiveSecs < r.activeSecs
+                  ? `Unique active ${fmtDuration(r.uniqueActiveSecs)} (overlaps counted once)`
+                  : `Screen time ${fmtDuration(r.activeSecs + r.idleSecs)}`
+              }
+            />
             <Stat
               label="Daily average"
               value={fmtDuration(r.dailyAvgSecs)}
@@ -59,6 +70,12 @@ export default function Reports() {
               hint={r.peakHour === null ? "—" : `Most active ${String(r.peakHour).padStart(2, "0")}:00–${String(r.peakHour + 1).padStart(2, "0")}:00`}
             />
           </div>
+
+          {hasSeveral(r.devices) && (
+            <div className="mt-4">
+              <DeviceBreakdown devices={r.devices} uniqueSecs={r.devicesUniqueSecs} onPick={setDevice} title="Devices in this period" />
+            </div>
+          )}
 
           <div className="mt-4 grid gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2" title={multiDay ? "Daily usage" : "Usage by hour"}>
@@ -84,7 +101,7 @@ export default function Reports() {
                 <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-emerald-500" />Productive</span>
                 <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-slate-400" />Neutral</span>
                 <span><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-rose-500" />Distracting</span>
-                <span className="ml-auto">Based on app categories</span>
+                <span className="ml-auto">Based on app and website categories</span>
               </div>
             </Card>
             <Card title="Insights">

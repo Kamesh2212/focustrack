@@ -1,6 +1,6 @@
 [package]
 name = "focustrack"
-version = "1.1.0"
+version = "1.2.0"
 description = "FocusTrack - Windows screen time & digital wellbeing"
 edition = "2021"
 
@@ -22,12 +22,16 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+focustrack-sync-proto = { path = "../crates/sync-proto", features = ["client"] }
+base64 = "0.22"
+tauri-plugin-focustrack-usage = { path = "../plugins/usage" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Registry",
@@ -40,6 +44,15 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The background usage job calls into Rust from Kotlin (phone.rs).
+jni = "0.21"
+
+[dev-dependencies]
+# Sync tests run the real sync server in-process.
+focustrack-server = { path = "../server" }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 
 [profile.release]
 codegen-units = 1

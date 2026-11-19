@@ -104,6 +104,20 @@ export interface Dashboard {
   week: DayTotal[];
   hourly: number[];
   live: LiveStatus;
+  uniqueActiveSecs: number;
+  devices: DeviceTotal[];
+  devicesUniqueSecs: number;
+}
+
+/** One device's screen time (Account & Sync). */
+export interface DeviceTotal {
+  id: string;
+  name: string;
+  platform: string;
+  activeSecs: number;
+  idleSecs: number;
+  lastActivity: string | null;
+  current: boolean;
 }
 
 export interface Report {
@@ -128,6 +142,9 @@ export interface Report {
   focusSessions: number;
   hourly: number[];
   heatmap: number[][];
+  uniqueActiveSecs: number;
+  devices: DeviceTotal[];
+  devicesUniqueSecs: number;
 }
 
 export interface SessionRow {
@@ -156,6 +173,30 @@ export interface Settings {
   overridesPerDay: number;
   goalReminder: string;
   dashboardLayout: string;
+}
+
+/** Multi-device sync status (Settings → Account & Sync). */
+export interface SyncStatus {
+  signedIn: boolean;
+  enabled: boolean;
+  email: string | null;
+  server: string | null;
+  deviceId: string;
+  deviceName: string;
+  state: "off" | "idle" | "syncing" | "error" | "signed_out";
+  lastSync: string | null;
+  lastError: string | null;
+  pending: number;
+  otherDevices: number;
+}
+
+export interface SyncDevice {
+  id: string;
+  name: string;
+  platform: string;
+  appVersion: string;
+  lastSeen: string | null;
+  current: boolean;
 }
 
 export interface AdminMode {

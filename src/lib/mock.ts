@@ -21,6 +21,8 @@ import type {
   Note,
   Profile,
   Resource,
+  SyncStatus,
+  DeviceTotal,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -131,6 +133,22 @@ let notes: Note[] = [
   { id: 3, notebook: "Quick notes", title: "Email Prof. about deadline", body: "Email Prof. about deadline", focusSessionId: null, sessionLabel: null, createdAt: `${today()} 11:00:00`, updatedAt: `${today()} 11:00:00` },
 ];
 let nextNoteId = 4;
+
+let phoneAccess = false;
+
+const sync: SyncStatus = {
+  signedIn: false,
+  enabled: false,
+  email: null,
+  server: null,
+  deviceId: "d1",
+  deviceName: "Home PC",
+  state: "off",
+  lastSync: null,
+  lastError: null,
+  pending: 0,
+  otherDevices: 0,
+};
 
 let resources: Resource[] = [
   { id: 1, title: "Google Scholar", url: "https://scholar.google.com", subject: null },
@@ -272,7 +290,29 @@ function split(cats: CategoryUsage[]) {
   };
 }
 
-function dashboard(): Dashboard {
+const DEVICE_SHARES: [Omit<DeviceTotal, "activeSecs" | "idleSecs" | "lastActivity">, number][] = [
+  [{ id: "d1", name: "Home PC", platform: "windows", current: true }, 0.55],
+  [{ id: "d2", name: "Study laptop", platform: "windows", current: false }, 0.3],
+  [{ id: "d3", name: "Pixel 8", platform: "android", current: false }, 0.15],
+];
+
+/** Sample data as if three devices were synced; a filter scales the headline numbers. */
+function withDevices<T extends { activeSecs: number; idleSecs: number; screenSecs?: number }>(x: T, device?: string): T & { devices: DeviceTotal[]; uniqueActiveSecs: number; devicesUniqueSecs: number } {
+  const total = x.activeSecs;
+  const devices = DEVICE_SHARES.map(([d, share], i) => ({
+    ...d,
+    activeSecs: Math.round(total * share),
+    idleSecs: Math.round(x.idleSecs * share),
+    lastActivity: d.current ? null : new Date(Date.now() - (i * 4 + 2) * 60_000).toISOString().slice(0, 19).replace("T", " "),
+  }));
+  const share =
+    !device || device === "all" ? 1 : device === "desktop" ? 0.85 : device === "mobile" ? 0.15 : (DEVICE_SHARES.find(([d]) => d.id === device)?.[1] ?? 1);
+  const scaled = { ...x, activeSecs: Math.round(x.activeSecs * share), idleSecs: Math.round(x.idleSecs * share) };
+  if (x.screenSecs !== undefined) scaled.screenSecs = Math.round(x.screenSecs * share);
+  return { ...scaled, devices, uniqueActiveSecs: Math.round(scaled.activeSecs * (share === 1 || share === 0.85 ? 0.88 : 1)), devicesUniqueSecs: Math.round(total * 0.88) };
+}
+
+function dashboard(): Omit<Dashboard, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
   const t = today();
   const apps = appsFor(t, t);
   const cats = categoriesFor(apps);
@@ -309,7 +349,7 @@ function dashboard(): Dashboard {
   };
 }
 
-function report(from: string, to: string): Report {
+function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
   const apps = appsFor(from, to);
   const cats = categoriesFor(apps);
   const days = daysFor(from, to);
@@ -390,7 +430,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
   const result: unknown = (() => {
     switch (cmd) {
       case "get_dashboard":
-        return dashboard();
+        return withDevices(dashboard(), a.device);
       case "get_live_status":
         return dashboard().live;
       case "get_apps":
@@ -398,7 +438,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "get_categories":
         return CATEGORIES;
       case "get_report":
-        return report(a.from, a.to);
+        return withDevices(report(a.from, a.to), a.device);
       case "get_history":
         return a.kind === "websites" ? siteHistory(a.from, a.to, a.search ?? "") : history(a.from, a.to, a.search ?? "");
       case "get_websites":
@@ -515,6 +555,47 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "open_url":
         window.open(String(a.url), "_blank", "noopener");
+        return null;
+      case "get_platform":
+        // Preview the phone app with ?platform=android
+        return new URLSearchParams(window.location.search).get("platform") ?? "windows";
+      case "get_insets":
+        return { top: 0, bottom: 0 };
+      case "phone_usage_access":
+        return phoneAccess;
+      case "open_usage_access":
+        phoneAccess = true;
+        return null;
+      case "import_phone_usage":
+        return phoneAccess ? 3 : null;
+      case "sync_status":
+        return { ...sync };
+      case "sync_sign_up":
+      case "sync_sign_in": {
+        if (!String(a.email).includes("@")) throw new Error("Enter a valid email address");
+        if (cmd === "sync_sign_up" && String(a.password).length < 10) throw new Error("Use a password of at least 10 characters");
+        Object.assign(sync, { signedIn: true, enabled: true, email: a.email, server: a.server, deviceName: a.deviceName, state: "idle", lastSync: new Date().toISOString().slice(0, 19).replace("T", " "), otherDevices: 1 });
+        return cmd === "sync_sign_up" ? "FT1-7K3M-QX9P-2HDW-V8RT-NC4J-6YBF-ZA1E-5GKS-0PWM-3TQV-H7XD-9RNC-JB2-4F8" : null;
+      }
+      case "sync_sign_out":
+        Object.assign(sync, { signedIn: false, enabled: false, email: null, state: "off", otherDevices: 0 });
+        return null;
+      case "sync_now":
+        sync.lastSync = new Date().toISOString().slice(0, 19).replace("T", " ");
+        return null;
+      case "sync_set_enabled":
+        Object.assign(sync, { enabled: a.enabled, state: a.enabled ? "idle" : "off" });
+        return null;
+      case "sync_devices":
+        return [
+          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), current: true },
+          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), current: false },
+        ];
+      case "sync_remove_device":
+        sync.otherDevices = 0;
+        return null;
+      case "sync_rename_device":
+        sync.deviceName = String(a.name);
         return null;
       case "get_admin_mode":
         return { elevated: false, enabled: false, needsAdmin: ["Genshin Impact"] };

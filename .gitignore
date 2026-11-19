@@ -8,3 +8,13 @@ src-tauri/gen/
 *.db-wal
 *.db-shm
 .claude/
+
+# Sync crates built without CARGO_TARGET_DIR
+crates/*/target/
+server/target/
+
+# Build output of local plugins (Gradle, Cargo)
+plugins/*/android/build/
+plugins/*/android/.gradle/
+plugins/*/target/
+plugins/*/android/.tauri/

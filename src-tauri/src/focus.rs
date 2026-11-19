@@ -747,8 +747,12 @@ pub fn totals_mode(
     mode: Option<&str>,
 ) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
-        "SELECT COALESCE(SUM(actual_secs), 0), COALESCE(SUM(completed), 0)
-         FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR mode = ?3)",
+        &format!(
+            "SELECT COALESCE(SUM(actual_secs), 0), COALESCE(SUM(completed), 0)
+             FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR mode = ?3)
+               AND {}",
+            db::in_view("device_id")
+        ),
         params![from, to, mode],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
@@ -812,6 +816,7 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                 if shared.show_requested.swap(false, Ordering::SeqCst) {
                     use tauri::Manager;
                     if let Some(w) = app.get_webview_window("main") {
+                        #[cfg(desktop)]
                         let _ = w.unminimize();
                         let _ = w.show();
                         let _ = w.set_focus();

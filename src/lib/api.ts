@@ -25,6 +25,8 @@ import type {
   SessionRow,
   Settings,
   SiteUsage,
+  SyncDevice,
+  SyncStatus,
   Theme,
 } from "./types";
 import { mock } from "./mock";
@@ -38,14 +40,15 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const api = {
-  dashboard: () => call<Dashboard>("get_dashboard"),
+  /** `device`: "all", "desktop", "mobile" or a device id. */
+  dashboard: (device = "all") => call<Dashboard>("get_dashboard", { device }),
   liveStatus: () => call<LiveStatus>("get_live_status"),
   apps: (from: string, to: string) => call<AppUsage[]>("get_apps", { from, to }),
   categories: () => call<Category[]>("get_categories"),
   setAppCategory: (appId: number, categoryId: number | null) =>
     call<void>("set_app_category", { appId, categoryId }),
   renameApp: (appId: number, name: string) => call<void>("rename_app", { appId, name }),
-  report: (from: string, to: string) => call<Report>("get_report", { from, to }),
+  report: (from: string, to: string, device = "all") => call<Report>("get_report", { from, to, device }),
   history: (from: string, to: string, search: string, kind: HistoryKind, limit = 500) =>
     call<SessionRow[]>("get_history", { from, to, search, limit, kind }),
   exportCsv: (from: string, to: string, search: string, kind: HistoryKind) =>
@@ -90,6 +93,25 @@ export const api = {
   showMainWindow: () => call<void>("show_main_window"),
   enableAdminMode: () => call<void>("enable_admin_mode"),
   disableAdminMode: () => call<void>("disable_admin_mode"),
+  /** "windows" | "android" | … */
+  platform: () => call<string>("get_platform"),
+  insets: () => call<{ top: number; bottom: number }>("get_insets"),
+  phoneUsageAccess: () => call<boolean>("phone_usage_access"),
+  openUsageAccess: () => call<void>("open_usage_access"),
+  /** New sessions imported, or null without usage access. */
+  importPhoneUsage: () => call<number | null>("import_phone_usage"),
+  syncStatus: () => call<SyncStatus>("sync_status"),
+  /** Returns the recovery key, to show once. */
+  syncSignUp: (server: string, email: string, password: string, deviceName: string) =>
+    call<string>("sync_sign_up", { server, email, password, deviceName }),
+  syncSignIn: (server: string, email: string, password: string, deviceName: string) =>
+    call<void>("sync_sign_in", { server, email, password, deviceName }),
+  syncSignOut: () => call<void>("sync_sign_out"),
+  syncNow: () => call<void>("sync_now"),
+  syncSetEnabled: (enabled: boolean) => call<void>("sync_set_enabled", { enabled }),
+  syncDevices: () => call<SyncDevice[]>("sync_devices"),
+  syncRemoveDevice: (id: string) => call<void>("sync_remove_device", { id }),
+  syncRenameDevice: (name: string) => call<void>("sync_rename_device", { name }),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

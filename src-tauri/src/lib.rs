@@ -1,8 +1,11 @@
-//! FocusTrack desktop app: tray-resident screen time tracker.
+//! FocusTrack: tray-resident screen time tracker on Windows, and the
+//! companion app on Android (same database, analytics, sync and screens).
 
 // `let out = rows.collect(); out` is deliberate: in edition 2021 returning the
 // iterator directly keeps the prepared statement borrowed past its lifetime.
 #![allow(clippy::let_and_return)]
+// Phones don't use the Windows tracker, blocker, tray or browser API.
+#![cfg_attr(mobile, allow(dead_code, unused_mut, unused_imports, unused_variables))]
 
 mod admin;
 mod analytics;
@@ -19,15 +22,20 @@ mod insights;
 mod installed;
 mod limits;
 mod notes;
+mod phone;
 mod platform;
 mod popup;
+mod profile;
 mod profiles;
+mod sync;
 mod tracker;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent};
 
@@ -35,13 +43,16 @@ pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub shared: Arc<tracker::Shared>,
     pub data_dir: PathBuf,
+    pub sync: Arc<sync::SyncHandle>,
 }
 
 /// Tray "Pause/Resume tracking" item, kept so its label follows the setting.
+#[cfg(desktop)]
 pub struct TrayPause(pub MenuItem<tauri::Wry>);
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -61,6 +72,7 @@ pub(crate) fn quit(app: &AppHandle) {
     app.exit(0);
 }
 
+#[cfg(desktop)]
 fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open FocusTrack", true, None::<&str>)?;
     let pause = MenuItem::with_id(
@@ -113,24 +125,33 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // A second launch just focuses the running instance (no double tracking).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main(app)
-        }))
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_autostart::init(
+    let mut builder = tauri::Builder::default();
+    // A second launch just focuses the running instance (no double tracking).
+    // Development profiles run side by side as separate devices instead.
+    #[cfg(desktop)]
+    {
+        if profile::name().is_none() {
+            builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                show_main(app)
+            }));
+        }
+        builder = builder.plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
-        ))
+        ));
+    }
+    builder
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_focustrack_usage::init())
         .setup(|app| {
             // Administrator mode is on but this copy isn't elevated (e.g. opened
             // from the Start menu): hand over to the administrator copy.
-            if admin::hand_over_if_needed() {
+            #[cfg(desktop)]
+            if profile::name().is_none() && admin::hand_over_if_needed() {
                 std::process::exit(0);
             }
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = profile::data_dir(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("focustrack.db");
 
@@ -149,18 +170,35 @@ pub fn run() {
             shared
                 .break_reminder_mins
                 .store(settings.break_reminder_mins, Ordering::SeqCst);
-            tracker::spawn(db_path.clone(), shared.clone());
-            browser::spawn_server(shared.clone(), db_path.clone());
+            // On Windows the tracker watches the foreground window and the
+            // browser extension reports websites; phones import usage from the
+            // OS instead (see the usage plugin).
+            #[cfg(desktop)]
+            {
+                tracker::spawn(db_path.clone(), shared.clone());
+                browser::spawn_server(shared.clone(), db_path.clone());
+            }
             focus::spawn(app.handle().clone(), db_path.clone(), shared.clone());
+            #[cfg(desktop)]
             blocker::spawn(app.handle().clone(), shared.clone());
-            limits::spawn(app.handle().clone(), db_path, shared.clone());
+            limits::spawn(app.handle().clone(), db_path.clone(), shared.clone());
+            let sync = sync::SyncHandle::new(data_dir.clone());
+            sync::refresh_status(&sync, &conn);
+            #[cfg(mobile)]
+            phone::spawn(app.handle().clone(), db_path.clone(), sync.clone());
+            sync::spawn(sync.clone(), db_path, shared.clone());
 
             app.manage(AppState {
                 db: Mutex::new(conn),
                 shared,
                 data_dir,
+                sync,
             });
+            #[cfg(desktop)]
             build_tray(app, settings.paused)?;
+            if let (Some(name), Some(w)) = (profile::name(), app.get_webview_window("main")) {
+                let _ = w.set_title(&format!("FocusTrack — {name}"));
+            }
 
             // Launched at Windows sign-in: stay in the tray.
             if !std::env::args().any(|a| a == "--minimized") {
@@ -235,6 +273,20 @@ pub fn run() {
             commands::show_main_window,
             commands::enable_admin_mode,
             commands::disable_admin_mode,
+            commands::sync_status,
+            commands::sync_sign_up,
+            commands::sync_sign_in,
+            commands::sync_sign_out,
+            commands::sync_now,
+            commands::sync_set_enabled,
+            commands::sync_devices,
+            commands::sync_remove_device,
+            commands::sync_rename_device,
+            commands::get_platform,
+            commands::get_insets,
+            commands::phone_usage_access,
+            commands::open_usage_access,
+            commands::import_phone_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocusTrack");

@@ -17,6 +17,9 @@ pub const DEFAULT_CATEGORIES: &[(&str, &str, &str)] = &[
 
 /// Best-guess category for a freshly seen executable (lower-case exe name).
 pub fn default_category_for(exe_lower: &str) -> &'static str {
+    if let Some(c) = android_category(exe_lower) {
+        return c;
+    }
     let stem = exe_lower.strip_suffix(".exe").unwrap_or(exe_lower);
     match stem {
         "code" | "code - insiders" | "cursor" | "devenv" | "idea64" | "pycharm64"
@@ -193,6 +196,73 @@ pub const STUDY_DOMAINS: &[&str] = &[
     "leetcode.com",
     "scholar.google.com",
 ];
+
+/// Categories for common Android apps, by package name (lower case).
+fn android_category(pkg: &str) -> Option<&'static str> {
+    if !pkg.contains('.') || pkg.ends_with(".exe") || pkg.contains(['\\', '/']) {
+        return None;
+    }
+    let starts = |p: &[&str]| p.iter().any(|x| pkg.starts_with(x));
+    Some(match pkg {
+        "com.google.android.youtube"
+        | "com.netflix.mediaclient"
+        | "com.spotify.music"
+        | "com.amazon.avod.thirdpartyclient"
+        | "com.disney.disneyplus"
+        | "tv.twitch.android.app"
+        | "com.google.android.apps.youtube.music" => "Entertainment",
+        "com.instagram.android"
+        | "com.facebook.katana"
+        | "com.zhiliaoapp.musically"
+        | "com.ss.android.ugc.trill"
+        | "com.twitter.android"
+        | "com.reddit.frontpage"
+        | "com.snapchat.android"
+        | "com.pinterest"
+        | "com.instagram.barcelona" => "Social Media",
+        "com.whatsapp"
+        | "org.telegram.messenger"
+        | "org.thoughtcrime.securesms"
+        | "com.google.android.gm"
+        | "com.discord"
+        | "com.slack"
+        | "com.microsoft.teams"
+        | "com.google.android.apps.messaging"
+        | "com.microsoft.office.outlook" => "Communication",
+        "com.duolingo"
+        | "com.ichi2.anki"
+        | "org.khanacademy.android"
+        | "com.quizlet.quizletandroid"
+        | "com.amazon.kindle" => "Study",
+        "com.google.android.apps.docs"
+        | "com.google.android.apps.docs.editors.docs"
+        | "com.google.android.apps.docs.editors.sheets"
+        | "com.microsoft.office.word"
+        | "com.microsoft.office.excel"
+        | "notion.id"
+        | "md.obsidian"
+        | "com.todoist"
+        | "com.google.android.calendar"
+        | "com.google.android.keep" => "Productivity",
+        _ if starts(&[
+            "com.mihoyo.",
+            "com.hoyoverse.",
+            "com.supercell.",
+            "com.king.",
+            "com.mojang.",
+            "com.roblox.",
+            "com.activision.",
+            "com.tencent.ig",
+            "com.pubg.",
+            "com.ea.gp.",
+            "com.riotgames.",
+        ]) =>
+        {
+            "Gaming"
+        }
+        _ => return None,
+    })
+}
 
 /// Browser family for a foreground executable, matching what the extension
 /// reports (`chrome`, `edge`, `brave`, `firefox`, `opera`, `vivaldi`).
