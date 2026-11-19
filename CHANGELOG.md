@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Focus and study sessions survive a crash, restart or quitting FocusTrack: the session and its blocking pick up
+  where they left off, and a round that ended while FocusTrack wasn't running keeps only the time it saw (#12).
+- Changing the system clock no longer resets daily limits: until the real day ends, limits keep counting today's
+  usage. Clock changes are recorded. Sleep, time sync, daylight saving and time-zone changes aren't affected (#11).
+- Blocked apps showing a "Save changes?" dialog are never force-closed: FocusTrack waits for you to answer it,
+  then asks the app to close again (#13).
+- The productivity summary, reports and insights count browser time by website category, so YouTube is
+  Entertainment and GitHub is Development instead of both being neutral (#14).
+- Two different programs with the same file name (two `javaw.exe` or `launcher.exe` from different folders) are
+  no longer merged when you switch between them.
+- "Warn me at" now also warns for limits set to *Block at the limit*, before the app or site is blocked.
+- Deleting data older than N days also removes that period's limit extensions and goal check-offs.
+- Notes are no longer re-saved (and moved to the top) just by opening and leaving them, and a note deleted
+  while an edit was pending isn't saved again.
+
 ### Changed
 - Reorder dashboard sections and side-panel widgets by drag and drop instead of one step at a time with
   arrows. The drag handle also moves an item with the arrow keys.

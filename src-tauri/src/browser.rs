@@ -128,7 +128,7 @@ fn summary(conn: &rusqlite::Connection, shared: &Shared) -> rusqlite::Result<Sum
                 secs: s.secs,
             })
             .collect(),
-        limits: crate::limits::limit_status(conn, &day)?
+        limits: crate::limits::current_status(conn, now())?
             .into_iter()
             .filter(|l| l.enabled)
             .collect(),

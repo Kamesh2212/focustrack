@@ -174,7 +174,7 @@ export function Heatmap({ grid }: { grid: number[][] }) {
 
 const KIND_COLORS = { productive: "#10b981", neutral: "#94a3b8", distracting: "#ef4444" };
 
-/** Productive / neutral / distracting app time per day. */
+/** Productive / neutral / distracting time per day (browser time counted by website). */
 export function ProductivityChart({ days, height = 220 }: { days: DayKinds[]; height?: number }) {
   const short = days.length <= 7;
   const data = days.map((d) => ({

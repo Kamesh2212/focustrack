@@ -201,6 +201,8 @@ struct ActiveSpan {
     span: Span,
     app_id: i64,
     exe: String,
+    /// Identity of the foreground program (path for generic names like javaw.exe).
+    key: String,
     name: String,
 }
 
@@ -340,11 +342,10 @@ impl<P: Probe> Tracker<P> {
             }
             Some(app) => {
                 let record_app = !paused || self.is_limited_app(&app);
-                let same = self
-                    .active
-                    .as_ref()
-                    .map(|a| a.exe.eq_ignore_ascii_case(&app.exe_name))
-                    .unwrap_or(false);
+                // Same program, not just the same exe name: two javaw.exe or
+                // launcher.exe from different folders are different apps (#5).
+                let key = crate::identity::app_key(&app.exe_name, &app.exe_path);
+                let same = self.active.as_ref().is_some_and(|a| a.key == key);
                 if !record_app {
                     if let Some(a) = self.active.take() {
                         self.finish(SpanKind::Usage, a.span, now);
@@ -639,6 +640,7 @@ impl<P: Probe> Tracker<P> {
                 },
                 app_id,
                 exe: app.exe_name.clone(),
+                key: crate::identity::app_key(&app.exe_name, &app.exe_path),
                 name,
             }),
             Err(e) => {
@@ -715,6 +717,8 @@ mod tests {
 
     struct Fake {
         app: Option<&'static str>,
+        /// Folder the app runs from.
+        dir: &'static str,
         idle: u64,
         controller_idle: u64,
         audible: Vec<&'static str>,
@@ -725,6 +729,7 @@ mod tests {
         fn default() -> Self {
             Fake {
                 app: None,
+                dir: "C:\\",
                 idle: 0,
                 controller_idle: u64::MAX,
                 audible: Vec::new(),
@@ -737,7 +742,7 @@ mod tests {
         fn foreground(&mut self) -> Option<ForegroundApp> {
             self.app.map(|n| ForegroundApp {
                 exe_name: n.into(),
-                exe_path: format!("C:\\{n}"),
+                exe_path: format!("{}{n}", self.dir),
             })
         }
         fn idle_seconds(&mut self) -> u64 {
@@ -823,6 +828,35 @@ mod tests {
         assert_eq!(rows[0].2, 601);
         assert_eq!(rows[1].0, "chrome.exe");
         assert_eq!(rows[1].2, 299);
+    }
+
+    #[test]
+    fn same_exe_name_from_different_folders_are_different_apps() {
+        let mut t = setup(at(18, 9, 0, 0));
+        t.probe.app = Some("javaw.exe");
+        t.probe.dir = "C:\\Games\\Minecraft\\";
+        run(&mut t, at(18, 9, 0, 0), at(18, 9, 10, 0));
+        t.probe.dir = "C:\\Tools\\IDE\\";
+        run(&mut t, at(18, 9, 10, 1), at(18, 9, 15, 0));
+        t.close_all(at(18, 9, 15, 0));
+        let rows: Vec<(String, i64)> = t
+            .conn
+            .prepare(
+                "SELECT a.exe_path, s.duration_secs FROM usage_sessions s
+                 JOIN applications a ON a.id = s.app_id ORDER BY s.id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("C:\\Games\\Minecraft\\javaw.exe".to_string(), 601),
+                ("C:\\Tools\\IDE\\javaw.exe".to_string(), 299)
+            ]
+        );
     }
 
     #[test]

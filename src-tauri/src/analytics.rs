@@ -147,32 +147,134 @@ pub fn app_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
     out
 }
 
+/// One day's time in one category.
+struct CatRow {
+    day: String,
+    cat: CategoryUsage,
+}
+
+/// Screen time per day and category. Time in a browser is split by the
+/// categories of the websites visited in it (#14), so YouTube counts as
+/// Entertainment and GitHub as Development rather than both as "Other".
+/// Browser time without a recorded website keeps the browser's own category.
+fn category_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<CatRow>> {
+    let cat = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<CategoryUsage> {
+        Ok(CategoryUsage {
+            name: r.get(i)?,
+            color: r.get(i + 1)?,
+            kind: r.get(i + 2)?,
+            secs: r.get(i + 3)?,
+        })
+    };
+    const CAT: &str =
+        "COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral')";
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.day, a.exe_name, {CAT}, SUM(s.duration_secs)
+         FROM usage_sessions s
+         JOIN applications a ON a.id = s.app_id
+         LEFT JOIN categories c ON c.id = a.category_id
+         WHERE s.day BETWEEN ?1 AND ?2
+         GROUP BY s.day, a.id"
+    ))?;
+    let apps = stmt
+        .query_map(params![from, to], |r| {
+            let exe: String = r.get(1)?;
+            Ok((
+                crate::categories::browser_family(&exe),
+                CatRow {
+                    day: r.get(0)?,
+                    cat: cat(r, 2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.day, s.browser, {CAT}, SUM(s.duration_secs)
+         FROM website_sessions s
+         JOIN websites w ON w.id = s.website_id
+         LEFT JOIN categories c ON c.id = w.category_id
+         WHERE s.day BETWEEN ?1 AND ?2
+         GROUP BY s.day, s.browser, 3, 4, 5"
+    ))?;
+    let sites = stmt
+        .query_map(params![from, to], |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                CatRow {
+                    day: r.get(0)?,
+                    cat: cat(r, 2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Browser and website time per (day, browser family).
+    let mut app_total: HashMap<(String, String), i64> = HashMap::new();
+    for (family, row) in &apps {
+        if let Some(f) = family {
+            *app_total
+                .entry((row.day.clone(), f.to_string()))
+                .or_default() += row.cat.secs;
+        }
+    }
+    let mut web_total: HashMap<(String, String), i64> = HashMap::new();
+    for (browser, row) in &sites {
+        *web_total
+            .entry((row.day.clone(), browser.clone()))
+            .or_default() += row.cat.secs;
+    }
+    // (seconds of browser time that move to website categories, browser total, website total)
+    let moved = |day: &str, family: &str| -> (i64, i64, i64) {
+        let key = (day.to_string(), family.to_string());
+        let a = app_total.get(&key).copied().unwrap_or(0);
+        let w = web_total.get(&key).copied().unwrap_or(0);
+        (a.min(w), a, w)
+    };
+    let scale = |secs: i64, num: i64, den: i64| -> i64 {
+        if den == 0 {
+            0
+        } else {
+            ((secs as i128 * num as i128 + den as i128 / 2) / den as i128) as i64
+        }
+    };
+
+    let mut out = Vec::with_capacity(apps.len() + sites.len());
+    for (family, mut row) in apps {
+        if let Some(f) = family {
+            let (credit, a, _) = moved(&row.day, f);
+            row.cat.secs = scale(row.cat.secs, a - credit, a);
+        }
+        out.push(row);
+    }
+    for (browser, mut row) in sites {
+        // Only time spent with the browser in front counts (it always should be).
+        let (credit, _, w) = moved(&row.day, &browser);
+        row.cat.secs = scale(row.cat.secs, credit, w);
+        out.push(row);
+    }
+    out.retain(|r| r.cat.secs > 0);
+    Ok(out)
+}
+
 pub fn category_usage(
     conn: &Connection,
     from: &str,
     to: &str,
 ) -> rusqlite::Result<Vec<CategoryUsage>> {
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral'),
-                SUM(s.duration_secs) AS secs
-         FROM usage_sessions s
-         JOIN applications a ON a.id = s.app_id
-         LEFT JOIN categories c ON c.id = a.category_id
-         WHERE s.day BETWEEN ?1 AND ?2
-         GROUP BY 1, 2, 3
-         HAVING secs > 0
-         ORDER BY secs DESC",
-    )?;
-    let rows = stmt.query_map(params![from, to], |r| {
-        Ok(CategoryUsage {
-            name: r.get(0)?,
-            color: r.get(1)?,
-            kind: r.get(2)?,
-            secs: r.get(3)?,
-        })
-    })?;
-    let out = rows.collect();
-    out
+    let mut merged: Vec<CategoryUsage> = Vec::new();
+    for CatRow { cat, .. } in category_rows(conn, from, to)? {
+        match merged
+            .iter_mut()
+            .find(|c| c.name == cat.name && c.color == cat.color && c.kind == cat.kind)
+        {
+            Some(c) => c.secs += cat.secs,
+            None => merged.push(cat),
+        }
+    }
+    merged.sort_by(|a, b| b.secs.cmp(&a.secs).then_with(|| a.name.cmp(&b.name)));
+    Ok(merged)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -322,6 +424,50 @@ mod tests {
     }
 
     #[test]
+    fn browser_time_counts_by_website_category() {
+        use crate::db::{self, SpanKind};
+        let conn = db::open_in_memory().unwrap();
+        let t = |m: i64| at(18, 9, 0) + Duration::minutes(m);
+        let span = |kind, id, from, to| db::update_span(&conn, kind, id, t(from), t(to)).unwrap();
+        // 60 minutes in Brave: 30 on YouTube, 20 on GitHub, 10 with no site recorded.
+        let (brave, _) =
+            db::get_or_create_app(&conn, "brave.exe", "", || "Brave".into(), t(0)).unwrap();
+        let id = db::insert_usage(&conn, brave, t(0)).unwrap();
+        span(SpanKind::Usage, id, 0, 60);
+        let yt = db::get_or_create_website(&conn, "youtube.com", t(0)).unwrap();
+        let id = db::insert_website_session(&conn, yt, "brave", t(0)).unwrap();
+        span(SpanKind::Website, id, 0, 30);
+        let gh = db::get_or_create_website(&conn, "github.com", t(30)).unwrap();
+        let id = db::insert_website_session(&conn, gh, "brave", t(30)).unwrap();
+        span(SpanKind::Website, id, 30, 50);
+        // 15 minutes in a game.
+        let (game, _) =
+            db::get_or_create_app(&conn, "game.exe", "", || "Game".into(), t(60)).unwrap();
+        conn.execute("UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Gaming') WHERE id = ?1", [game]).unwrap();
+        let id = db::insert_usage(&conn, game, t(60)).unwrap();
+        span(SpanKind::Usage, id, 60, 75);
+
+        let cats = category_usage(&conn, "2026-11-18", "2026-11-18").unwrap();
+        let secs = |name: &str| cats.iter().find(|c| c.name == name).map_or(0, |c| c.secs);
+        assert_eq!(secs("Entertainment"), 30 * 60);
+        assert_eq!(secs("Development"), 20 * 60);
+        assert_eq!(secs("Gaming"), 15 * 60);
+        assert_eq!(
+            cats.iter().map(|c| c.secs).sum::<i64>(),
+            75 * 60,
+            "total screen time unchanged"
+        );
+        // Gaming + YouTube are distracting; GitHub is productive.
+        assert_eq!(productive_split(&cats), (20 * 60, 45 * 60));
+
+        let day = &daily_kinds(&conn, at(18, 0, 0).date(), at(18, 0, 0).date()).unwrap()[0];
+        assert_eq!(
+            (day.productive_secs, day.distracting_secs, day.neutral_secs),
+            (20 * 60, 45 * 60, 10 * 60)
+        );
+    }
+
+    #[test]
     fn hour_buckets_split_across_hours() {
         // Wed 18 Nov 2026, 09:30 -> 11:15
         let (hours, heat) = hour_buckets(&[(at(18, 9, 30), at(18, 11, 15))]);
@@ -371,28 +517,16 @@ pub struct DayKinds {
     pub distracting_secs: i64,
 }
 
-/// App time per day split by category kind (zero-filled).
+/// Screen time per day split by category kind, with browser time split by
+/// website (zero-filled).
 pub fn daily_kinds(
     conn: &Connection,
     from: NaiveDate,
     to: NaiveDate,
 ) -> rusqlite::Result<Vec<DayKinds>> {
-    let mut stmt = conn.prepare(
-        "SELECT s.day, COALESCE(c.kind, 'neutral'), SUM(s.duration_secs)
-         FROM usage_sessions s JOIN applications a ON a.id = s.app_id
-         LEFT JOIN categories c ON c.id = a.category_id
-         WHERE s.day BETWEEN ?1 AND ?2 GROUP BY 1, 2",
-    )?;
     let mut map: HashMap<String, DayKinds> = HashMap::new();
-    let rows = stmt.query_map(params![fmt_day(from), fmt_day(to)], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (day, kind, secs) = row?;
+    for CatRow { day, cat } in category_rows(conn, &fmt_day(from), &fmt_day(to))? {
+        let (kind, secs) = (cat.kind, cat.secs);
         let e = map.entry(day.clone()).or_insert(DayKinds {
             day,
             productive_secs: 0,

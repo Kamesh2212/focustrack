@@ -7,7 +7,9 @@
 //!     (or, for "allow only" profiles, any foreground app not on the list).
 //!
 //! A blocked app is first asked to close its windows (WM_CLOSE, so it can
-//! offer to save work); if it is still running 8 s later it is terminated.
+//! offer to save work); if it is still running 8 s later it is terminated —
+//! unless it is showing a dialog such as "Save changes?", in which case
+//! FocusTrack waits for the user to answer it, then asks again (#13).
 //! Apps are recognised by identity (path, launcher folder, original file
 //! name — see `identity.rs`), not just exe name. Apps running as
 //! administrator can only be closed when FocusTrack runs as administrator too.
@@ -30,6 +32,29 @@ use std::time::{Duration, Instant};
 const CHECK_EVERY: Duration = Duration::from_secs(2);
 const FORCE_AFTER: Duration = Duration::from_secs(8);
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
+
+/// What to do with a blocked app that was asked to close.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Wait,
+    /// It shows a dialog (probably "Save changes?"): never force-close then.
+    WaitForUser,
+    /// The dialog was answered but the app is still open: ask to close again.
+    AskAgain,
+    Terminate,
+}
+
+fn next_step(elapsed: Duration, dialog_open: bool, was_waiting: bool) -> Step {
+    if elapsed < FORCE_AFTER {
+        Step::Wait
+    } else if dialog_open {
+        Step::WaitForUser
+    } else if was_waiting {
+        Step::AskAgain
+    } else {
+        Step::Terminate
+    }
+}
 const ADMIN_NOTICE_EVERY: Duration = Duration::from_secs(30 * 60);
 
 /// Never blocked, whatever a profile or limit says.
@@ -192,7 +217,8 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
         .spawn(move || {
             let own = own_exe();
             let elevated = platform::is_elevated();
-            let mut asked: HashMap<u32, Instant> = HashMap::new();
+            // pid → (when it was asked to close, waiting for the user to answer a dialog)
+            let mut asked: HashMap<u32, (Instant, bool)> = HashMap::new();
             let mut notified: HashMap<String, Instant> = HashMap::new();
             let mut info: HashMap<u32, ProcInfo> = HashMap::new();
             let mut originals: HashMap<String, Option<String>> = HashMap::new();
@@ -238,10 +264,13 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                     if is_protected(&p, pid, &own) {
                         continue;
                     }
-                    match asked.get(&pid) {
+                    let step = asked.get(&pid).map(|(t, waiting)| {
+                        next_step(t.elapsed(), platform::has_modal_dialog(pid), *waiting)
+                    });
+                    match step {
                         None => {
                             platform::close_windows(pid);
-                            asked.insert(pid, Instant::now());
+                            asked.insert(pid, (Instant::now(), false));
                             let due = notified
                                 .get(&lower)
                                 .is_none_or(|t| t.elapsed() >= NOTIFY_EVERY);
@@ -251,7 +280,23 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                                 notified.insert(lower, Instant::now());
                             }
                         }
-                        Some(t) if t.elapsed() >= FORCE_AFTER => {
+                        Some(Step::Wait) => {}
+                        Some(Step::WaitForUser) => {
+                            let first = asked.insert(pid, (Instant::now(), true)).is_some_and(|(_, w)| !w);
+                            if first {
+                                let name = reason_name(&reason);
+                                notify(
+                                    &app,
+                                    &format!("{name} is asking you to save"),
+                                    &format!("Save your work or close {name}. FocusTrack won't force it closed while it's asking."),
+                                );
+                            }
+                        }
+                        Some(Step::AskAgain) => {
+                            platform::close_windows(pid);
+                            asked.insert(pid, (Instant::now(), false));
+                        }
+                        Some(Step::Terminate) => {
                             if !platform::terminate(pid) && !elevated {
                                 // Games like Genshin Impact run as administrator; Windows
                                 // doesn't let a normal app close them.
@@ -271,7 +316,6 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                             }
                             asked.remove(&pid);
                         }
-                        Some(_) => {}
                     }
                 }
             }
@@ -287,6 +331,19 @@ fn name_for(reason: &Reason) -> String {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn never_force_closes_while_asking_to_save() {
+        let s = |secs| Duration::from_secs(secs);
+        assert_eq!(next_step(s(3), false, false), Step::Wait);
+        assert_eq!(next_step(s(9), false, false), Step::Terminate);
+        // "Save changes?" is open: wait, however long it takes.
+        assert_eq!(next_step(s(9), true, false), Step::WaitForUser);
+        assert_eq!(next_step(s(600), true, true), Step::WaitForUser);
+        // Answered, still running after a few seconds (Cancel): ask again, don't kill.
+        assert_eq!(next_step(s(2), false, true), Step::Wait);
+        assert_eq!(next_step(s(9), false, true), Step::AskAgain);
+    }
 
     fn at(h: u32, m: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 11, 18)

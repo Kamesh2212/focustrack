@@ -25,6 +25,8 @@ function Editor({ note, notebooks, fixedNotebook, onSaved, onDelete }: {
   latest.current = { title, body, notebook };
 
   const save = async () => {
+    // Nothing pending any more: leaving the note mustn't save it again.
+    timer.current = null;
     setState("saving");
     try {
       const n = await api.updateNote(note.id, latest.current.notebook, latest.current.title, latest.current.body);
@@ -70,7 +72,14 @@ function Editor({ note, notebooks, fixedNotebook, onSaved, onDelete }: {
         <span className={cx("shrink-0 text-xs", state === "error" ? "text-rose-600" : "text-slate-400")}>
           {state === "saving" ? "Saving…" : state === "unsaved" ? "Editing" : state === "error" ? "Couldn't save" : "Saved"}
         </span>
-        <button onClick={onDelete} className="rounded p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950" aria-label="Delete note">
+        <button
+          onClick={() => {
+            // Drop unsaved edits of a note that is being deleted.
+            if (timer.current) window.clearTimeout(timer.current);
+            timer.current = null;
+            onDelete();
+          }}
+          className="rounded p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950" aria-label="Delete note">
           <Trash2 size={15} />
         </button>
       </div>

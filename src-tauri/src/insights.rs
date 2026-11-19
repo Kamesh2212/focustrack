@@ -142,7 +142,7 @@ pub fn insights(conn: &Connection, today: NaiveDate) -> rusqlite::Result<Vec<Ins
                 "info"
             },
             text: format!(
-                "You spent {} on entertainment, social media and gaming apps this week.",
+                "You spent {} on entertainment, social media and gaming apps and websites this week.",
                 fmt(distracting)
             ),
         });

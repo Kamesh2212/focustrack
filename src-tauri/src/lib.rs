@@ -9,6 +9,7 @@ mod analytics;
 mod blocker;
 mod browser;
 mod categories;
+mod clock;
 mod commands;
 mod db;
 mod focus;
