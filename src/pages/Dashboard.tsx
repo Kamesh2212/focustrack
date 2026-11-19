@@ -12,6 +12,8 @@ import { GoalManager } from "../components/Goals";
 import { QuickNote } from "../components/NotesPanel";
 import { InsightList } from "../components/Insights";
 import { DeviceBreakdown, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
+import { PhoneAccessBanner } from "../components/PhoneAccess";
+import { isPhone, usePlatform } from "../lib/platform";
 import type { FocusStatus } from "../lib/types";
 
 function parseTs(ts: string): number {
@@ -223,6 +225,8 @@ function Customizer({ layout, onChange }: { layout: Layout; onChange: (l: Layout
 
 export default function Dashboard() {
   const [device, setDevice] = useDeviceFilter();
+  // The live "Using …" strip is the Windows tracker's; phones import usage instead.
+  const phone = isPhone(usePlatform());
   const { data: d, error } = useLoad(() => api.dashboard(device), [device], 5000);
   const focus = useLoad(() => api.focus(), [], 5000);
   const insights = useLoad(() => api.insights(), [], 300000);
@@ -334,7 +338,7 @@ export default function Dashboard() {
       case "websites":
         return (
           <Card title="Most-used websites" action={d.siteSecs > 0 && <span className="tabular text-xs text-slate-500">{fmtDuration(d.siteSecs)} on the web</span>}>
-            <SiteList sites={d.topSites} limit={6} empty="No websites yet. Install the browser extension (see Websites) to track them." />
+            <SiteList sites={d.topSites} limit={6} empty={phone ? "No websites yet. Websites are tracked on your computers with the browser extension." : "No websites yet. Install the browser extension (see Websites) to track them."} />
           </Card>
         );
       case "productivity":
@@ -427,9 +431,10 @@ export default function Dashboard() {
         }
       />
       <ErrorNote error={error} />
+      <PhoneAccessBanner />
       {customizing && <Customizer layout={current} onChange={updateLayout} />}
       {focus.data?.active && <FocusBanner f={focus.data.active} />}
-      <LiveBanner live={d.live} />
+      {!phone && <LiveBanner live={d.live} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         {current

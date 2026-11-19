@@ -1,13 +1,21 @@
 //! The small always-on-top focus timer that pops up while a focus or study
 //! session runs. It loads the same UI as the main window at `#mini`.
 
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager};
+#[cfg(desktop)]
+use tauri::{PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 pub const LABEL: &str = "mini";
 const WIDTH: f64 = 320.0;
 const HEIGHT: f64 = 200.0;
 
 /// Shows the timer pop-up (bottom-right of the screen), creating it if needed.
+/// Phones have no floating windows; the app's own focus screen is used instead.
+#[cfg(mobile)]
+pub fn open(_app: &AppHandle) {}
+
+/// Shows the timer pop-up (bottom-right of the screen), creating it if needed.
+#[cfg(desktop)]
 pub fn open(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(LABEL) {
         let _ = w.show();

@@ -816,6 +816,7 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                 if shared.show_requested.swap(false, Ordering::SeqCst) {
                     use tauri::Manager;
                     if let Some(w) = app.get_webview_window("main") {
+                        #[cfg(desktop)]
                         let _ = w.unminimize();
                         let _ = w.show();
                         let _ = w.set_focus();

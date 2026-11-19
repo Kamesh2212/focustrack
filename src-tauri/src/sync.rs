@@ -31,7 +31,13 @@ const SYNC_EVERY: Duration = Duration::from_secs(60);
 const BATCH: usize = 500;
 /// Detailed history a new device downloads (design D7).
 const FIRST_SYNC_DAYS: u32 = 35;
-const PLATFORM: &str = "windows";
+/// This device's platform as other devices see it.
+#[cfg(target_os = "android")]
+pub const PLATFORM: &str = "android";
+#[cfg(target_os = "ios")]
+pub const PLATFORM: &str = "ios";
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub const PLATFORM: &str = "windows";
 
 // ------------------------------------------------------------------ secrets
 
@@ -231,7 +237,13 @@ fn default_device_name() -> String {
             }
             c
         })
-        .unwrap_or_else(|_| "This PC".into())
+        .unwrap_or_else(|_| {
+            if PLATFORM == "android" {
+                "Android phone".into()
+            } else {
+                "This PC".into()
+            }
+        })
 }
 
 /// This device's name (as shown to the user's other devices).

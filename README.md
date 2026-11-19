@@ -93,6 +93,7 @@ for the MSVC linker. Set a short build directory, e.g. `CARGO_TARGET_DIR=C:\ft-t
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to report issues, pick work, branch and open pull requests.
 - [docs/ROADMAP.md](docs/ROADMAP.md): what's next, including multi-device sync.
 - [docs/SYNC-DESIGN.md](docs/SYNC-DESIGN.md): design for multi-device sync (draft).
+- [docs/ANDROID.md](docs/ANDROID.md): the Android app (preview): how it differs and how to build it.
 - [docs/AUDIT-1.0.0.md](docs/AUDIT-1.0.0.md): test results and known issues for 1.0.0.
 - [docs/SRS.md](docs/SRS.md): the original requirements.
 - [CHANGELOG.md](CHANGELOG.md).

@@ -5,13 +5,24 @@ use crate::browser;
 use crate::db;
 use crate::limits::{self, LimitStatus};
 use crate::tracker::LiveStatus;
-use crate::{AppState, TrayPause};
+use crate::AppState;
+#[cfg(desktop)]
+use crate::TrayPause;
 use chrono::{Datelike, Duration, Local, Weekday};
 use rusqlite::params;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager, State};
+#[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
+
+/// Whether FocusTrack starts with the computer (always false on phones).
+fn autostart_enabled(_app: &AppHandle) -> bool {
+    #[cfg(desktop)]
+    return _app.autolaunch().is_enabled().unwrap_or(false);
+    #[cfg(mobile)]
+    false
+}
 
 type CmdResult<T> = Result<T, String>;
 
@@ -466,7 +477,7 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Set
     Ok(Settings {
         paused: state.shared.paused.load(Ordering::SeqCst),
         idle_threshold_secs: s.idle_threshold_secs,
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart: autostart_enabled(&app),
         theme: s.theme,
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         notifications_enabled: s.notifications_enabled,
@@ -520,6 +531,7 @@ pub fn apply_paused(app: &AppHandle, paused: bool) -> CmdResult<()> {
         let conn = conn!(state);
         db::set_setting(&conn, "paused", if paused { "1" } else { "0" }).map_err(err)?;
     }
+    #[cfg(desktop)]
     if let Some(item) = app.try_state::<TrayPause>() {
         let _ = item.0.set_text(if paused {
             "Resume tracking"
@@ -550,13 +562,21 @@ pub fn set_idle_threshold(state: State<'_, AppState>, secs: u64) -> CmdResult<()
 
 #[tauri::command]
 pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
-    let launcher = app.autolaunch();
-    let result = if enabled {
-        launcher.enable()
-    } else {
-        launcher.disable()
-    };
-    result.map_err(err)
+    #[cfg(desktop)]
+    {
+        let launcher = app.autolaunch();
+        let result = if enabled {
+            launcher.enable()
+        } else {
+            launcher.disable()
+        };
+        result.map_err(err)
+    }
+    #[cfg(mobile)]
+    {
+        let _ = (app, enabled);
+        Err("Not available on this device".into())
+    }
 }
 
 #[tauri::command]
@@ -957,6 +977,7 @@ pub async fn start_focus(
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -1242,6 +1263,7 @@ pub async fn enable_admin_mode(app: AppHandle) -> CmdResult<()> {
         .await
         .map_err(err)??;
     // The task starts FocusTrack at sign-in now; avoid a second, normal start.
+    #[cfg(desktop)]
     let _ = app.autolaunch().disable();
     crate::admin::restart_elevated();
     crate::quit(&app);
@@ -1253,6 +1275,7 @@ pub async fn disable_admin_mode(app: AppHandle) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(crate::admin::disable)
         .await
         .map_err(err)??;
+    #[cfg(desktop)]
     let _ = app.autolaunch().enable();
     if crate::platform::is_elevated() {
         crate::admin::restart_normal();
@@ -1353,4 +1376,53 @@ pub async fn sync_remove_device(state: State<'_, AppState>, id: String) -> CmdRe
 #[tauri::command]
 pub async fn sync_rename_device(state: State<'_, AppState>, name: String) -> CmdResult<()> {
     with_sync(&state, move |h, c| crate::sync::rename_device(h, c, &name)).await
+}
+
+// ------------------------------------------------------------------ phone
+
+/// `windows`, `android`, … so the UI can show what applies on this device.
+#[tauri::command]
+pub fn get_platform() -> &'static str {
+    crate::sync::PLATFORM
+}
+
+/// Whether the phone lets FocusTrack read screen time (Android usage access).
+#[tauri::command]
+pub fn phone_usage_access(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().has_access()
+}
+
+/// Status- and navigation-bar heights on phones (zero elsewhere).
+#[tauri::command]
+pub fn get_insets(app: AppHandle) -> CmdResult<tauri_plugin_focustrack_usage::Insets> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().insets()
+}
+
+#[tauri::command]
+pub fn open_usage_access(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().open_access_settings()
+}
+
+/// Imports new phone usage now (when the app comes to the front). Returns how
+/// many sessions were added, or null without usage access.
+#[tauri::command]
+pub async fn import_phone_usage(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Option<usize>> {
+    let path = state.data_dir.join("focustrack.db");
+    let sync = state.sync.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open(&path).map_err(err)?;
+        let n = crate::phone::import(&app, &conn)?;
+        if n.is_some_and(|n| n > 0) {
+            sync.wake();
+        }
+        Ok(n)
+    })
+    .await
+    .map_err(err)?
 }

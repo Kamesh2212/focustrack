@@ -93,6 +93,13 @@ export const api = {
   showMainWindow: () => call<void>("show_main_window"),
   enableAdminMode: () => call<void>("enable_admin_mode"),
   disableAdminMode: () => call<void>("disable_admin_mode"),
+  /** "windows" | "android" | … */
+  platform: () => call<string>("get_platform"),
+  insets: () => call<{ top: number; bottom: number }>("get_insets"),
+  phoneUsageAccess: () => call<boolean>("phone_usage_access"),
+  openUsageAccess: () => call<void>("open_usage_access"),
+  /** New sessions imported, or null without usage access. */
+  importPhoneUsage: () => call<number | null>("import_phone_usage"),
   syncStatus: () => call<SyncStatus>("sync_status"),
   /** Returns the recovery key, to show once. */
   syncSignUp: (server: string, email: string, password: string, deviceName: string) =>

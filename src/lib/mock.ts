@@ -134,6 +134,8 @@ let notes: Note[] = [
 ];
 let nextNoteId = 4;
 
+let phoneAccess = false;
+
 const sync: SyncStatus = {
   signedIn: false,
   enabled: false,
@@ -554,6 +556,18 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "open_url":
         window.open(String(a.url), "_blank", "noopener");
         return null;
+      case "get_platform":
+        // Preview the phone app with ?platform=android
+        return new URLSearchParams(window.location.search).get("platform") ?? "windows";
+      case "get_insets":
+        return { top: 0, bottom: 0 };
+      case "phone_usage_access":
+        return phoneAccess;
+      case "open_usage_access":
+        phoneAccess = true;
+        return null;
+      case "import_phone_usage":
+        return phoneAccess ? 3 : null;
       case "sync_status":
         return { ...sync };
       case "sync_sign_up":

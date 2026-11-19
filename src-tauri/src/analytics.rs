@@ -449,7 +449,7 @@ pub fn device_totals(
         .map(|mut d| {
             if d.current {
                 d.name = crate::sync::device_name(conn);
-                d.platform = "windows".into();
+                d.platform = crate::sync::PLATFORM.into();
             } else if let Some((name, platform)) = known.get(&d.id) {
                 d.name = name.clone();
                 d.platform = platform.clone();

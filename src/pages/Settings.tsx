@@ -6,6 +6,8 @@ import type { Settings as SettingsT, Theme } from "../lib/types";
 import { Button, Card, ConfirmButton, ErrorNote, PageHeader, Segmented, Toggle } from "../components/ui";
 import { InstallSteps, browserLabel, StatusDot, useBrowserStatus } from "../components/ExtensionStatus";
 import { SyncSettings } from "../components/SyncSettings";
+import { PhoneAccessCard } from "../components/PhoneAccess";
+import { isPhone, usePlatform } from "../lib/platform";
 
 const IDLE_OPTIONS = [60, 120, 180, 300, 600, 900, 1800];
 const RETENTION_OPTIONS = [30, 90, 180, 365];
@@ -33,6 +35,9 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
   const { data, error, reload } = useLoad(() => api.settings(), []);
   const browser = useBrowserStatus();
   const admin = useLoad(() => api.adminMode(), [], 15000);
+  // Windows-only settings (tracker, start with Windows, administrator mode,
+  // browser extension) don't apply on phones.
+  const phone = isPhone(usePlatform());
   const [retention, setRetention] = useState(90);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -62,6 +67,9 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
       )}
 
       <div className="grid gap-4 xl:grid-cols-2">
+        <PhoneAccessCard />
+        {!phone && (
+        <>
         <Card title="Tracking">
           <Row title="Track my computer usage" desc="When paused, nothing is recorded except apps and websites that have a usage limit — those keep counting and stay blocked when the limit is reached. Also available from the tray icon.">
             <Toggle label="Tracking enabled" checked={!s.paused} onChange={(on) => run(() => api.setPaused(!on))} />
@@ -124,11 +132,21 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
             </p>
           )}
         </Card>
+        </>
+        )}
 
         <Card title="Notifications">
-          <Row title="Desktop notifications" desc="Limit warnings, limits reached and break reminders appear as Windows notifications.">
-            <Toggle label="Desktop notifications" checked={s.notificationsEnabled} onChange={(on) => run(() => api.setNotificationsEnabled(on))} />
+          <Row
+            title={phone ? "Notifications" : "Desktop notifications"}
+            desc={
+              phone
+                ? "Limit warnings, limits reached and goal reminders appear as phone notifications."
+                : "Limit warnings, limits reached and break reminders appear as Windows notifications."
+            }
+          >
+            <Toggle label="Notifications" checked={s.notificationsEnabled} onChange={(on) => run(() => api.setNotificationsEnabled(on))} />
           </Row>
+          {!phone && (
           <Row title="Break reminder" desc="Remind me after this much continuous computer use. A 5-minute break resets it.">
             <select
               value={s.breakReminderMins}
@@ -142,6 +160,7 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
               ))}
             </select>
           </Row>
+          )}
           <Row title="Goal reminder" desc="Once a day at this time, remind me about goals that aren't done yet.">
             <select
               value={s.goalReminder}
@@ -156,13 +175,21 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
               ))}
             </select>
           </Row>
-          <Row title="Test" desc="Check that Windows shows FocusTrack notifications (Focus Assist / Do Not Disturb can hide them).">
+          <Row
+            title="Test"
+            desc={
+              phone
+                ? "Check that your phone shows FocusTrack notifications (Do Not Disturb can hide them)."
+                : "Check that Windows shows FocusTrack notifications (Focus Assist / Do Not Disturb can hide them)."
+            }
+          >
             <Button onClick={() => run(() => api.testNotification(), "Test notification sent.")}>
               <Bell size={15} /> Send test
             </Button>
           </Row>
         </Card>
 
+        {!phone && (
         <Card title="Website tracking">
           <Row title="Track websites" desc="Uses the FocusTrack browser extension. Only domains are recorded; private windows never are.">
             <Toggle label="Track websites" checked={s.websiteTracking} onChange={(on) => run(() => api.setWebsiteTracking(on))} />
@@ -193,6 +220,7 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
             </div>
           )}
         </Card>
+        )}
 
         <Card title="Appearance">
           <Row title="Theme">

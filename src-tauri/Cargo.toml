@@ -24,6 +24,7 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 focustrack-sync-proto = { path = "../crates/sync-proto", features = ["client"] }
 base64 = "0.22"
+tauri-plugin-focustrack-usage = { path = "../plugins/usage" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
