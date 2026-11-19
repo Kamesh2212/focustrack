@@ -5,10 +5,19 @@ sync. What differs:
 
 | | Windows | Android |
 |---|---|---|
-| Screen time | Foreground window, every second (`tracker.rs`) | Android **Usage access** events, imported on start, on return to the app and every minute (`phone.rs`, plugin `plugins/usage`) |
+| Screen time | Foreground window, every second (`tracker.rs`) | Android **Usage access** events, imported on start, on return to the app and every minute, and **in the background about every 15 minutes** while the app is closed, followed by a sync (`phone.rs`, plugin `plugins/usage`) |
 | Websites | Browser extension | Not tracked (shown from your computers) |
 | Blocking | `blocker.rs` | Not yet (#69) |
 | Tray, start with Windows, administrator mode, pop-up timer | Yes | No |
+
+The background job is a WorkManager periodic task (`BackgroundImport.kt`). Android reads the events in Kotlin
+and passes them to the same Rust code through JNI (`Java_com_focustrack_usage_BackgroundImport_run` in
+`phone.rs`), which records them and syncs. Recording takes the database's write lock and re-reads how far the
+last import got, so the app and the job can run at the same time without recording anything twice.
+
+To run the job now for testing: `adb shell cmd jobscheduler run -f com.focustrack.app <job id>` (find the id
+with `adb shell dumpsys jobscheduler | grep "JOB #.*focustrack"`). WorkManager skips a periodic run that isn't
+due yet, so a forced run right after an earlier one may do nothing.
 
 The usage plugin's Kotlin part (`plugins/usage/android`) reads `UsageStatsManager` events and app names (only for
 apps with a launcher icon) and measures the status/navigation bars, which the WebView doesn't report to CSS.

@@ -37,6 +37,9 @@ pub struct UsageEvents {
     pub events: Vec<UsageEvent>,
     /// Human-readable app names by package.
     pub labels: HashMap<String, String>,
+    /// Home-screen launchers (time on the home screen isn't app use).
+    #[serde(default)]
+    pub home: Vec<String>,
 }
 
 #[cfg(target_os = "android")]
@@ -82,6 +85,25 @@ impl<R: Runtime> Usage<R> {
             .map_err(|e| e.to_string());
         #[cfg(not(target_os = "android"))]
         Err("Usage access is only needed on phones".into())
+    }
+
+    /// Tells the background job where the app's data lives and schedules it
+    /// (about every 15 minutes, while the app is closed too).
+    pub fn enable_background(&self, data_dir: &str) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        return self
+            .handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "enableBackground",
+                serde_json::json!({ "dataDir": data_dir }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = data_dir;
+            Ok(())
+        }
     }
 
     /// System bar sizes, so the UI can keep clear of them (the WebView doesn't

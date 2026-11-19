@@ -25,20 +25,32 @@ pub struct Span {
     pub end: i64,
 }
 
-/// Foreground spans from events (sorted by time). Also returns the start of
-/// a span still open at the end, so the next import can pick it up from there.
-pub fn spans(events: &[UsageEvent]) -> (Vec<Span>, Option<i64>) {
+/// An app leaving and coming back within this long (switching between its own
+/// screens) is one session, not two.
+const SAME_APP_GAP_MS: i64 = 2000;
+
+/// Foreground spans from events (sorted by time). Time on a home screen
+/// (`home` launchers) isn't app use. Also returns the start of a span still
+/// open at the end, so the next import can pick it up from there.
+pub fn spans(events: &[UsageEvent], home: &[String]) -> (Vec<Span>, Option<i64>) {
     let mut out = Vec::new();
+    // The app in front: (package, since).
     let mut current: Option<(String, i64)> = None;
-    let mut close = |current: &mut Option<(String, i64)>, at: i64| {
-        if let Some((package, start)) = current.take() {
-            if at - start >= 1000 {
-                out.push(Span {
-                    package,
-                    start,
-                    end: at,
-                });
-            }
+    // An app that just paused: (package, since, paused at). It may resume a
+    // moment later on another of its screens.
+    let mut paused: Option<(String, i64, i64)> = None;
+    let push = |out: &mut Vec<Span>, package: String, start: i64, end: i64| {
+        if end - start >= 1000 {
+            out.push(Span {
+                package,
+                start,
+                end,
+            });
+        }
+    };
+    let flush = |out: &mut Vec<Span>, paused: &mut Option<(String, i64, i64)>| {
+        if let Some((p, start, end)) = paused.take() {
+            push(out, p, start, end);
         }
     };
     for e in events {
@@ -47,18 +59,38 @@ pub fn spans(events: &[UsageEvent]) -> (Vec<Span>, Option<i64>) {
                 if current.as_ref().is_some_and(|(p, _)| *p == e.package) {
                     continue; // another screen of the same app
                 }
-                close(&mut current, e.time);
-                current = Some((e.package.clone(), e.time));
+                // Back to the same app within a moment: carry on its session.
+                if let Some((p, start, at)) = paused.take() {
+                    if p == e.package && e.time - at <= SAME_APP_GAP_MS {
+                        current = Some((p, start));
+                        continue;
+                    }
+                    push(&mut out, p, start, at);
+                }
+                if let Some((p, start)) = current.take() {
+                    push(&mut out, p, start, e.time);
+                }
+                if !home.contains(&e.package) {
+                    current = Some((e.package.clone(), e.time));
+                }
             }
             kind::ACTIVITY_PAUSED => {
                 if current.as_ref().is_some_and(|(p, _)| *p == e.package) {
-                    close(&mut current, e.time);
+                    flush(&mut out, &mut paused);
+                    let (p, start) = current.take().expect("checked above");
+                    paused = Some((p, start, e.time));
                 }
             }
-            kind::SCREEN_NON_INTERACTIVE | kind::KEYGUARD_SHOWN => close(&mut current, e.time),
+            kind::SCREEN_NON_INTERACTIVE | kind::KEYGUARD_SHOWN => {
+                flush(&mut out, &mut paused);
+                if let Some((p, start)) = current.take() {
+                    push(&mut out, p, start, e.time);
+                }
+            }
             _ => {}
         }
     }
+    flush(&mut out, &mut paused);
     let open = current.map(|(_, start)| start);
     (out, open)
 }
@@ -110,6 +142,50 @@ pub fn record(
     Ok(written)
 }
 
+/// Where the next import starts (Unix milliseconds).
+pub fn import_since(conn: &Connection, now_ms: i64) -> rusqlite::Result<i64> {
+    Ok(db::get_setting(conn, "phone_usage_since")?
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(now_ms - FIRST_IMPORT_DAYS * 86_400_000))
+}
+
+/// Records events newer than the last import, and moves the import point on.
+///
+/// The app and the background job may import at the same moment, from
+/// separate processes. The write lock is taken first and the starting point
+/// re-read inside it, so the second one only sees what the first left over:
+/// no session is ever recorded twice. Returns (sessions added, next start).
+pub fn record_events(
+    conn: &Connection,
+    events: &mut [UsageEvent],
+    labels: &std::collections::HashMap<String, String>,
+    home: &[String],
+    now_ms: i64,
+) -> rusqlite::Result<(usize, i64)> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let since = import_since(conn, now_ms)?;
+        events.sort_by_key(|e| e.time);
+        let fresh: Vec<UsageEvent> = events.iter().filter(|e| e.time >= since).cloned().collect();
+        let (spans, open) = spans(&fresh, home);
+        let n = record(conn, &spans, labels)?;
+        // Next time, start from the app still in front (it isn't recorded yet).
+        let next = open.unwrap_or(now_ms).max(since);
+        db::set_setting(conn, "phone_usage_since", &next.to_string())?;
+        Ok((n, next))
+    })();
+    match result {
+        Ok(v) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Imports new phone usage. Returns how many sessions were added, or `None`
 /// when usage access isn't granted.
 pub fn import<R: tauri::Runtime>(
@@ -122,20 +198,109 @@ pub fn import<R: tauri::Runtime>(
         return Ok(None);
     }
     let now = Local::now().timestamp_millis();
-    let since = db::get_setting(conn, "phone_usage_since")
-        .map_err(|e| e.to_string())?
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(now - FIRST_IMPORT_DAYS * 86_400_000);
+    let since = import_since(conn, now).map_err(|e| e.to_string())?;
     let mut got = usage.events(since, now)?;
-    got.events.sort_by_key(|e| e.time);
-    let (spans, open) = spans(&got.events);
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let n = record(&tx, &spans, &got.labels).map_err(|e| e.to_string())?;
-    // Next time, start from the app still in front (it isn't recorded yet).
-    let next = open.unwrap_or(now).max(since);
-    db::set_setting(&tx, "phone_usage_since", &next.to_string()).map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
+    let (n, _) = record_events(conn, &mut got.events, &got.labels, &got.home, now)
+        .map_err(|e| e.to_string())?;
     Ok(Some(n))
+}
+
+/// Input from the background job: events read by Android while the app was closed.
+// Used by the Android background job (and tests).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(serde::Deserialize)]
+pub struct BackgroundInput {
+    pub events: Vec<UsageEvent>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub home: Vec<String>,
+}
+
+/// What the background job reports back (JSON).
+// Used by the Android background job (and tests).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(serde::Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundResult {
+    pub imported: usize,
+    /// Where the next import should start reading.
+    pub next_since: i64,
+    /// Whether a sync ran and finished.
+    pub synced: bool,
+    pub error: Option<String>,
+}
+
+/// The background job (#68): record events read while the app was closed,
+/// then sync once if this device is signed in. Runs without the app's UI or
+/// runtime, in the same app process (Android WorkManager → JNI).
+// Used by the Android background job (and tests).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn background_run(data_dir: &std::path::Path, input_json: &str) -> BackgroundResult {
+    let mut out = BackgroundResult::default();
+    let mut input: BackgroundInput = match serde_json::from_str(input_json) {
+        Ok(i) => i,
+        Err(e) => {
+            out.error = Some(format!("bad input: {e}"));
+            return out;
+        }
+    };
+    let mut conn = match db::open(&data_dir.join("focustrack.db")) {
+        Ok(c) => c,
+        Err(e) => {
+            out.error = Some(format!("database: {e}"));
+            return out;
+        }
+    };
+    let now = Local::now().timestamp_millis();
+    match record_events(&conn, &mut input.events, &input.labels, &input.home, now) {
+        Ok((n, next)) => {
+            out.imported = n;
+            out.next_since = next;
+        }
+        Err(e) => {
+            out.error = Some(format!("import: {e}"));
+            return out;
+        }
+    }
+    let enabled = db::get_setting(&conn, "sync_enabled")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1");
+    if enabled {
+        let handle = crate::sync::SyncHandle::new(data_dir.to_path_buf());
+        match crate::sync::sync_once(&handle, &mut conn) {
+            Ok(()) => out.synced = true,
+            Err(e) => out.error = Some(format!("sync: {e}")),
+        }
+    }
+    out
+}
+
+/// JNI entry point for the WorkManager job in `plugins/usage`
+/// (`com.focustrack.usage.BackgroundImport.run`).
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_focustrack_usage_BackgroundImport_run<'l>(
+    mut env: jni::JNIEnv<'l>,
+    _class: jni::objects::JClass<'l>,
+    data_dir: jni::objects::JString<'l>,
+    input: jni::objects::JString<'l>,
+) -> jni::objects::JString<'l> {
+    let dir: String = env
+        .get_string(&data_dir)
+        .map(Into::into)
+        .unwrap_or_default();
+    let json: String = env.get_string(&input).map(Into::into).unwrap_or_default();
+    let result = std::panic::catch_unwind(|| background_run(std::path::Path::new(&dir), &json))
+        .unwrap_or_else(|_| BackgroundResult {
+            error: Some("background import crashed".into()),
+            ..Default::default()
+        });
+    let text = serde_json::to_string(&result).unwrap_or_default();
+    env.new_string(text)
+        .unwrap_or_else(|_| jni::objects::JObject::null().into())
 }
 
 /// Imports every minute while the app runs (and right away on start).
@@ -148,6 +313,13 @@ pub fn spawn<R: tauri::Runtime>(
     std::thread::Builder::new()
         .name("focustrack-phone-usage".into())
         .spawn(move || {
+            // Keep importing (and syncing) every ~15 minutes while the app is closed.
+            if let Some(dir) = db_path.parent().and_then(|d| d.to_str()) {
+                use tauri_plugin_focustrack_usage::UsageExt;
+                if let Err(e) = app.usage().enable_background(dir) {
+                    eprintln!("[phone] couldn't schedule background import: {e}");
+                }
+            }
             let conn = match db::open(&db_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -201,7 +373,7 @@ mod tests {
             ev("com.instagram.android", kind::ACTIVITY_PAUSED, 901),
             ev("com.duolingo", kind::ACTIVITY_RESUMED, 2000), // still open
         ];
-        let (spans, open) = spans(&events);
+        let (spans, open) = spans(&events, &[]);
         assert_eq!(
             spans,
             vec![
@@ -214,13 +386,110 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_imports_never_record_twice() {
+        let conn = db::open_in_memory().unwrap();
+        let labels = Default::default();
+        let base = 1_800_000_000_000;
+        let now = base + 3_600_000;
+        db::set_setting(&conn, "phone_usage_since", &base.to_string()).unwrap();
+        let mut batch = vec![
+            ev("com.whatsapp", kind::ACTIVITY_RESUMED, 0),
+            ev("com.whatsapp", kind::ACTIVITY_PAUSED, 60),
+            ev("com.google.android.youtube", kind::ACTIVITY_RESUMED, 61),
+            ev("com.google.android.youtube", kind::ACTIVITY_PAUSED, 300),
+            ev("com.duolingo", kind::ACTIVITY_RESUMED, 400), // still open
+        ];
+        // The app imports first...
+        let (n, next) = record_events(&conn, &mut batch.clone(), &labels, &[], now).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(next, base + 400_000, "resumes at the app still in front");
+        // ...then the background job, which read the same events and more.
+        batch.push(ev("com.duolingo", kind::ACTIVITY_PAUSED, 500));
+        let (n, _) = record_events(&conn, &mut batch, &labels, &[], now + 1000).unwrap();
+        assert_eq!(n, 1, "only Duolingo is new");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn background_run_imports_without_the_app() {
+        let dir = std::env::temp_dir().join(format!("ft-bg-{}", focustrack_sync_proto::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = Local::now().timestamp_millis();
+        let input = serde_json::json!({
+            "events": [
+                { "package": "com.instagram.android", "kind": kind::ACTIVITY_RESUMED, "time": now - 600_000 },
+                { "package": "com.instagram.android", "kind": kind::ACTIVITY_PAUSED, "time": now - 300_000 },
+            ],
+            "labels": { "com.instagram.android": "Instagram" }
+        });
+        let r = background_run(&dir, &input.to_string());
+        assert_eq!(
+            (r.imported, r.synced, r.error.as_deref()),
+            (1, false, None),
+            "not signed in: no sync"
+        );
+        let conn = db::open(&dir.join("focustrack.db")).unwrap();
+        let name: String = conn
+            .query_row("SELECT a.display_name FROM usage_sessions s JOIN applications a ON a.id = s.app_id", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Instagram");
+        drop(conn);
+        let bad = background_run(&dir, "not json");
+        assert!(bad.error.unwrap().starts_with("bad input"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_screen_isnt_app_use_and_brief_gaps_join_up() {
+        let home = vec!["com.google.android.apps.nexuslauncher".to_string()];
+        let events = [
+            // YouTube's splash screen, then its main screen a second later.
+            ev("com.google.android.youtube", kind::ACTIVITY_RESUMED, 0),
+            ev("com.google.android.youtube", kind::ACTIVITY_PAUSED, 3),
+            ev("com.google.android.youtube", kind::ACTIVITY_RESUMED, 4),
+            ev("com.google.android.youtube", kind::ACTIVITY_PAUSED, 60),
+            // Home screen for 10 s.
+            ev(
+                "com.google.android.apps.nexuslauncher",
+                kind::ACTIVITY_RESUMED,
+                60,
+            ),
+            ev(
+                "com.google.android.apps.nexuslauncher",
+                kind::ACTIVITY_PAUSED,
+                70,
+            ),
+            ev("com.android.chrome", kind::ACTIVITY_RESUMED, 70),
+            ev("com.android.chrome", kind::ACTIVITY_PAUSED, 100),
+            ev(
+                "com.google.android.apps.nexuslauncher",
+                kind::ACTIVITY_RESUMED,
+                100,
+            ), // back home, stays
+        ];
+        let (spans, open) = spans(&events, &home);
+        assert_eq!(
+            spans,
+            vec![
+                span("com.google.android.youtube", 0, 60),
+                span("com.android.chrome", 70, 100)
+            ],
+            "one YouTube session, no home-screen sessions"
+        );
+        assert_eq!(open, None, "the home screen isn't left open");
+    }
+
+    #[test]
     fn switching_without_a_pause_event_closes_the_previous_app() {
         let events = [
             ev("com.whatsapp", kind::ACTIVITY_RESUMED, 0),
             ev("com.spotify.music", kind::ACTIVITY_RESUMED, 120),
             ev("com.spotify.music", kind::ACTIVITY_PAUSED, 180),
         ];
-        let (spans, open) = spans(&events);
+        let (spans, open) = spans(&events, &[]);
         assert_eq!(
             spans,
             vec![

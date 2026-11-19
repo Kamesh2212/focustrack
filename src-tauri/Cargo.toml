@@ -45,6 +45,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# The background usage job calls into Rust from Kotlin (phone.rs).
+jni = "0.21"
+
 [dev-dependencies]
 # Sync tests run the real sync server in-process.
 focustrack-server = { path = "../server" }
