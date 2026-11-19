@@ -234,7 +234,8 @@ fn default_device_name() -> String {
         .unwrap_or_else(|_| "This PC".into())
 }
 
-fn device_name(conn: &Connection) -> String {
+/// This device's name (as shown to the user's other devices).
+pub fn device_name(conn: &Connection) -> String {
     let base = setting(conn, "device_name").unwrap_or_else(default_device_name);
     match crate::profile::name() {
         Some(p) if setting(conn, "device_name").is_none() => format!("{base} ({p})"),

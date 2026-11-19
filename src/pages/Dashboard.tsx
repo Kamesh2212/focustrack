@@ -11,6 +11,7 @@ import { SiteList } from "../components/SiteList";
 import { GoalManager } from "../components/Goals";
 import { QuickNote } from "../components/NotesPanel";
 import { InsightList } from "../components/Insights";
+import { DeviceBreakdown, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
 import type { FocusStatus } from "../lib/types";
 
 function parseTs(ts: string): number {
@@ -73,10 +74,11 @@ function FocusBanner({ f }: { f: FocusStatus }) {
   );
 }
 
-type WidgetId = "overview" | "goals" | "focus" | "week" | "categories" | "apps" | "websites" | "productivity" | "hourly" | "limits" | "notes" | "insights";
+type WidgetId = "overview" | "devices" | "goals" | "focus" | "week" | "categories" | "apps" | "websites" | "productivity" | "hourly" | "limits" | "notes" | "insights";
 
 const WIDGETS: { id: WidgetId; title: string; wide?: boolean }[] = [
   { id: "overview", title: "Screen time overview", wide: true },
+  { id: "devices", title: "Devices" },
   { id: "goals", title: "Today's goals" },
   { id: "focus", title: "Focus session" },
   { id: "week", title: "Last 7 days" },
@@ -220,7 +222,8 @@ function Customizer({ layout, onChange }: { layout: Layout; onChange: (l: Layout
 }
 
 export default function Dashboard() {
-  const { data: d, error } = useLoad(() => api.dashboard(), [], 5000);
+  const [device, setDevice] = useDeviceFilter();
+  const { data: d, error } = useLoad(() => api.dashboard(device), [device], 5000);
   const focus = useLoad(() => api.focus(), [], 5000);
   const insights = useLoad(() => api.insights(), [], 300000);
   const limits = useLoad(() => api.limits(), [], 30000);
@@ -255,11 +258,21 @@ export default function Dashboard() {
               hint={change === null ? "No data for yesterday" : `${change > 0 ? "▲" : change < 0 ? "▼" : ""} ${Math.abs(change)}% active vs yesterday`}
               tone={change === null ? "default" : change > 0 ? "bad" : "good"}
             />
-            <Stat label="Active time" value={fmtDuration(d.activeSecs)} hint={`Daily average ${fmtDuration(d.dailyAvgSecs)}`} />
+            <Stat
+              label="Active time"
+              value={fmtDuration(d.activeSecs)}
+              hint={
+                hasSeveral(d.devices) && d.uniqueActiveSecs < d.activeSecs
+                  ? `Unique ${fmtDuration(d.uniqueActiveSecs)} (overlaps counted once)`
+                  : `Daily average ${fmtDuration(d.dailyAvgSecs)}`
+              }
+            />
             <Stat label="Idle time" value={fmtDuration(d.idleSecs)} hint={d.screenSecs ? `${Math.round((d.idleSecs / d.screenSecs) * 100)}% of screen time` : "—"} />
             <Stat label="Sessions" value={d.sessionCount} hint={mostUsed ? `Most used: ${mostUsed.name}` : "No apps yet"} />
           </div>
         );
+      case "devices":
+        return <DeviceBreakdown devices={d.devices} uniqueSecs={d.devicesUniqueSecs} onPick={setDevice} title="Devices today" />;
       case "goals":
         return (
           <Card title="Today's goals">
@@ -405,9 +418,12 @@ export default function Dashboard() {
         title="Today"
         subtitle={new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}
         actions={
-          <Button onClick={() => setCustomizing(!customizing)}>
-            <LayoutGrid size={15} /> {customizing ? "Done" : "Customize"}
-          </Button>
+          <>
+            <DevicePicker devices={d.devices} value={device} onChange={setDevice} />
+            <Button onClick={() => setCustomizing(!customizing)}>
+              <LayoutGrid size={15} /> {customizing ? "Done" : "Customize"}
+            </Button>
+          </>
         }
       />
       <ErrorNote error={error} />

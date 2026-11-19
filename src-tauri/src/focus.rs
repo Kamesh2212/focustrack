@@ -747,8 +747,12 @@ pub fn totals_mode(
     mode: Option<&str>,
 ) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
-        "SELECT COALESCE(SUM(actual_secs), 0), COALESCE(SUM(completed), 0)
-         FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR mode = ?3)",
+        &format!(
+            "SELECT COALESCE(SUM(actual_secs), 0), COALESCE(SUM(completed), 0)
+             FROM focus_sessions WHERE kind = 'focus' AND day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR mode = ?3)
+               AND {}",
+            db::in_view("device_id")
+        ),
         params![from, to, mode],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )

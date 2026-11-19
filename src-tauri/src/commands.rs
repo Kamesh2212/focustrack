@@ -49,13 +49,24 @@ pub struct Dashboard {
     pub week: Vec<DayTotal>,
     pub hourly: Vec<i64>,
     pub live: LiveStatus,
+    /// Active time with overlaps between devices counted once (#64).
+    pub unique_active_secs: i64,
+    /// Today's time per device (all devices, whatever the filter).
+    pub devices: Vec<an::DeviceTotal>,
+    /// Unique active time across all devices (for the devices breakdown).
+    pub devices_unique_secs: i64,
 }
 
+/// `device`: `all` (default), `desktop`, `mobile` or a device ID.
 #[tauri::command]
-pub fn get_dashboard(state: State<'_, AppState>) -> CmdResult<Dashboard> {
+pub fn get_dashboard(state: State<'_, AppState>, device: Option<String>) -> CmdResult<Dashboard> {
     let conn = conn!(state);
     let today = Local::now().date_naive();
     let t = an::fmt_day(today);
+    let devices = an::device_totals(&conn, &t, &t).map_err(err)?;
+    let devices_unique_secs = an::union_secs(&an::active_spans(&conn, &t, &t).map_err(err)?);
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
     let yesterday = an::fmt_day(today - Duration::days(1));
 
     let (active, idle) = an::totals(&conn, &t, &t).map_err(err)?;
@@ -88,6 +99,9 @@ pub fn get_dashboard(state: State<'_, AppState>) -> CmdResult<Dashboard> {
         week,
         hourly: hours.to_vec(),
         live: state.shared.status(),
+        unique_active_secs: an::union_secs(&spans),
+        devices,
+        devices_unique_secs,
     })
 }
 
@@ -192,15 +206,27 @@ pub struct Report {
     pub hourly: Vec<i64>,
     /// 7 rows (Mon..Sun) x 24 hours, active seconds.
     pub heatmap: Vec<Vec<i64>>,
+    pub unique_active_secs: i64,
+    pub devices: Vec<an::DeviceTotal>,
+    pub devices_unique_secs: i64,
 }
 
 #[tauri::command]
-pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdResult<Report> {
+pub fn get_report(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    device: Option<String>,
+) -> CmdResult<Report> {
     let (f, t) = (an::parse_day(&from)?, an::parse_day(&to)?);
     if f > t {
         return Err("Start date is after end date".into());
     }
     let conn = conn!(state);
+    let devices = an::device_totals(&conn, &from, &to).map_err(err)?;
+    let devices_unique_secs = an::union_secs(&an::active_spans(&conn, &from, &to).map_err(err)?);
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
     let len = (t - f).num_days() + 1;
     let (pf, pt) = (f - Duration::days(len), f - Duration::days(1));
 
@@ -253,6 +279,9 @@ pub fn get_report(state: State<'_, AppState>, from: String, to: String) -> CmdRe
         focus_sessions,
         hourly: hours.to_vec(),
         heatmap: heat.iter().map(|r| r.to_vec()).collect(),
+        unique_active_secs: an::union_secs(&spans),
+        devices,
+        devices_unique_secs,
     })
 }
 

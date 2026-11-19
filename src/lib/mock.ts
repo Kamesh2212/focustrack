@@ -22,6 +22,7 @@ import type {
   Profile,
   Resource,
   SyncStatus,
+  DeviceTotal,
 } from "./types";
 import { addDays, today } from "./format";
 
@@ -287,7 +288,29 @@ function split(cats: CategoryUsage[]) {
   };
 }
 
-function dashboard(): Dashboard {
+const DEVICE_SHARES: [Omit<DeviceTotal, "activeSecs" | "idleSecs" | "lastActivity">, number][] = [
+  [{ id: "d1", name: "Home PC", platform: "windows", current: true }, 0.55],
+  [{ id: "d2", name: "Study laptop", platform: "windows", current: false }, 0.3],
+  [{ id: "d3", name: "Pixel 8", platform: "android", current: false }, 0.15],
+];
+
+/** Sample data as if three devices were synced; a filter scales the headline numbers. */
+function withDevices<T extends { activeSecs: number; idleSecs: number; screenSecs?: number }>(x: T, device?: string): T & { devices: DeviceTotal[]; uniqueActiveSecs: number; devicesUniqueSecs: number } {
+  const total = x.activeSecs;
+  const devices = DEVICE_SHARES.map(([d, share], i) => ({
+    ...d,
+    activeSecs: Math.round(total * share),
+    idleSecs: Math.round(x.idleSecs * share),
+    lastActivity: d.current ? null : new Date(Date.now() - (i * 4 + 2) * 60_000).toISOString().slice(0, 19).replace("T", " "),
+  }));
+  const share =
+    !device || device === "all" ? 1 : device === "desktop" ? 0.85 : device === "mobile" ? 0.15 : (DEVICE_SHARES.find(([d]) => d.id === device)?.[1] ?? 1);
+  const scaled = { ...x, activeSecs: Math.round(x.activeSecs * share), idleSecs: Math.round(x.idleSecs * share) };
+  if (x.screenSecs !== undefined) scaled.screenSecs = Math.round(x.screenSecs * share);
+  return { ...scaled, devices, uniqueActiveSecs: Math.round(scaled.activeSecs * (share === 1 || share === 0.85 ? 0.88 : 1)), devicesUniqueSecs: Math.round(total * 0.88) };
+}
+
+function dashboard(): Omit<Dashboard, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
   const t = today();
   const apps = appsFor(t, t);
   const cats = categoriesFor(apps);
@@ -324,7 +347,7 @@ function dashboard(): Dashboard {
   };
 }
 
-function report(from: string, to: string): Report {
+function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
   const apps = appsFor(from, to);
   const cats = categoriesFor(apps);
   const days = daysFor(from, to);
@@ -405,7 +428,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
   const result: unknown = (() => {
     switch (cmd) {
       case "get_dashboard":
-        return dashboard();
+        return withDevices(dashboard(), a.device);
       case "get_live_status":
         return dashboard().live;
       case "get_apps":
@@ -413,7 +436,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "get_categories":
         return CATEGORIES;
       case "get_report":
-        return report(a.from, a.to);
+        return withDevices(report(a.from, a.to), a.device);
       case "get_history":
         return a.kind === "websites" ? siteHistory(a.from, a.to, a.search ?? "") : history(a.from, a.to, a.search ?? "");
       case "get_websites":

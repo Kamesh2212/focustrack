@@ -31,6 +31,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
          PRAGMA foreign_keys = ON;",
     )?;
     migrate(&conn)?;
+    create_device_view(&conn)?;
     Ok(conn)
 }
 
@@ -39,7 +40,50 @@ pub fn open_in_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     migrate(&conn)?;
+    create_device_view(&conn)?;
     Ok(conn)
+}
+
+// ------------------------------------------------------------ device view
+
+/// Which devices' data reports show on this connection (#64). Empty = all.
+/// A temporary table, so each connection (and thread) has its own view and
+/// the tracker, limits and blocker are never affected.
+fn create_device_view(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS device_view (id TEXT PRIMARY KEY);")
+}
+
+/// SQL condition: `col` belongs to a device in the current view.
+pub fn in_view(col: &str) -> String {
+    format!("(NOT EXISTS (SELECT 1 FROM temp.device_view) OR {col} IN (SELECT id FROM temp.device_view))")
+}
+
+/// Limits reports to `ids` until the returned guard is dropped (`None` = all devices).
+pub fn device_view<'a>(
+    conn: &'a Connection,
+    ids: Option<&[String]>,
+) -> rusqlite::Result<DeviceView<'a>> {
+    conn.execute("DELETE FROM temp.device_view", [])?;
+    if let Some(ids) = ids {
+        // An empty selection (e.g. "phones" with no phone) shows nothing, not everything.
+        let none = ["-".to_string()];
+        let ids = if ids.is_empty() { &none[..] } else { ids };
+        for id in ids {
+            conn.execute(
+                "INSERT OR IGNORE INTO temp.device_view (id) VALUES (?1)",
+                params![id],
+            )?;
+        }
+    }
+    Ok(DeviceView(conn))
+}
+
+pub struct DeviceView<'a>(&'a Connection);
+
+impl Drop for DeviceView<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.execute("DELETE FROM temp.device_view", []);
+    }
 }
 
 /// Schema migrations, tracked with `PRAGMA user_version`.

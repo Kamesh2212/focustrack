@@ -1,6 +1,6 @@
 //! Read-side queries and aggregations used by the dashboard and reports.
 
-use crate::db::{parse_time, DAY_FMT};
+use crate::db::{in_view, parse_time, DAY_FMT};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -60,12 +60,18 @@ pub fn days_between(from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
 
 pub fn totals(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<(i64, i64)> {
     let active: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions WHERE day BETWEEN ?1 AND ?2",
+        &format!(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions WHERE day BETWEEN ?1 AND ?2 AND {}",
+            in_view("device_id")
+        ),
         params![from, to],
         |r| r.get(0),
     )?;
     let idle: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(duration_secs), 0) FROM idle_periods WHERE day BETWEEN ?1 AND ?2",
+        &format!(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM idle_periods WHERE day BETWEEN ?1 AND ?2 AND {}",
+            in_view("device_id")
+        ),
         params![from, to],
         |r| r.get(0),
     )?;
@@ -81,9 +87,10 @@ pub fn daily_totals(
     let (f, t) = (fmt_day(from), fmt_day(to));
     let mut map: HashMap<String, (i64, i64)> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT day, SUM(duration_secs) FROM usage_sessions WHERE day BETWEEN ?1 AND ?2 GROUP BY day",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT day, SUM(duration_secs) FROM usage_sessions WHERE day BETWEEN ?1 AND ?2 AND {} GROUP BY day",
+            in_view("device_id")
+        ))?;
         let rows = stmt.query_map(params![f, t], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -93,9 +100,10 @@ pub fn daily_totals(
         }
     }
     {
-        let mut stmt = conn.prepare(
-            "SELECT day, SUM(duration_secs) FROM idle_periods WHERE day BETWEEN ?1 AND ?2 GROUP BY day",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT day, SUM(duration_secs) FROM idle_periods WHERE day BETWEEN ?1 AND ?2 AND {} GROUP BY day",
+            in_view("device_id")
+        ))?;
         let rows = stmt.query_map(params![f, t], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -120,16 +128,17 @@ pub fn daily_totals(
 
 /// Every known application with its usage in the range (unused apps get 0).
 pub fn app_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<AppUsage>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT a.id, a.display_name, a.exe_name, c.id,
                 COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral'),
                 COALESCE(SUM(s.duration_secs), 0) AS secs, COUNT(s.id)
          FROM applications a
          LEFT JOIN categories c ON c.id = a.category_id
-         LEFT JOIN usage_sessions s ON s.app_id = a.id AND s.day BETWEEN ?1 AND ?2
+         LEFT JOIN usage_sessions s ON s.app_id = a.id AND s.day BETWEEN ?1 AND ?2 AND {}
          GROUP BY a.id
          ORDER BY secs DESC, a.display_name COLLATE NOCASE",
-    )?;
+        in_view("s.device_id")
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| {
         Ok(AppUsage {
             id: r.get(0)?,
@@ -170,12 +179,13 @@ fn category_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
         "COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral')";
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT s.day, a.exe_name, {CAT}, SUM(s.duration_secs)
+        "SELECT s.day || '|' || COALESCE(s.device_id, ''), a.exe_name, {CAT}, SUM(s.duration_secs)
          FROM usage_sessions s
          JOIN applications a ON a.id = s.app_id
          LEFT JOIN categories c ON c.id = a.category_id
-         WHERE s.day BETWEEN ?1 AND ?2
-         GROUP BY s.day, a.id"
+         WHERE s.day BETWEEN ?1 AND ?2 AND {view}
+         GROUP BY s.day, s.device_id, a.id",
+        view = in_view("s.device_id")
     ))?;
     let apps = stmt
         .query_map(params![from, to], |r| {
@@ -191,12 +201,13 @@ fn category_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT s.day, s.browser, {CAT}, SUM(s.duration_secs)
+        "SELECT s.day || '|' || COALESCE(s.device_id, ''), s.browser, {CAT}, SUM(s.duration_secs)
          FROM website_sessions s
          JOIN websites w ON w.id = s.website_id
          LEFT JOIN categories c ON c.id = w.category_id
-         WHERE s.day BETWEEN ?1 AND ?2
-         GROUP BY s.day, s.browser, 3, 4, 5"
+         WHERE s.day BETWEEN ?1 AND ?2 AND {view}
+         GROUP BY s.day, s.device_id, s.browser, 3, 4, 5",
+        view = in_view("s.device_id")
     ))?;
     let sites = stmt
         .query_map(params![from, to], |r| {
@@ -255,6 +266,13 @@ fn category_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
         out.push(row);
     }
     out.retain(|r| r.cat.secs > 0);
+    // Rows were keyed by day and device (to match browser and website time on
+    // the same device); callers want the day.
+    for r in &mut out {
+        if let Some((day, _)) = r.day.split_once('|') {
+            r.day = day.to_string();
+        }
+    }
     Ok(out)
 }
 
@@ -292,16 +310,17 @@ pub struct SiteUsage {
 
 /// Every known website with its usage in the range (unused sites get 0).
 pub fn site_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Vec<SiteUsage>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT w.id, w.domain, c.id,
                 COALESCE(c.name, 'Other'), COALESCE(c.color, '#94a3b8'), COALESCE(c.kind, 'neutral'),
                 COALESCE(SUM(s.duration_secs), 0) AS secs, COUNT(s.id)
          FROM websites w
          LEFT JOIN categories c ON c.id = w.category_id
-         LEFT JOIN website_sessions s ON s.website_id = w.id AND s.day BETWEEN ?1 AND ?2
+         LEFT JOIN website_sessions s ON s.website_id = w.id AND s.day BETWEEN ?1 AND ?2 AND {}
          GROUP BY w.id
          ORDER BY secs DESC, w.domain",
-    )?;
+        in_view("s.device_id")
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| {
         Ok(SiteUsage {
             id: r.get(0)?,
@@ -320,10 +339,167 @@ pub fn site_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<V
 
 pub fn site_total(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT COALESCE(SUM(duration_secs), 0) FROM website_sessions WHERE day BETWEEN ?1 AND ?2",
+        &format!(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM website_sessions WHERE day BETWEEN ?1 AND ?2 AND {}",
+            in_view("device_id")
+        ),
         params![from, to],
         |r| r.get(0),
     )
+}
+
+/// Active time with overlaps counted once: an hour on the laptop while a
+/// video plays on the phone is one hour of unique time, two of combined (#64).
+pub fn union_secs(spans: &[(NaiveDateTime, NaiveDateTime)]) -> i64 {
+    let mut sorted: Vec<_> = spans.iter().filter(|(s, e)| e > s).copied().collect();
+    sorted.sort();
+    let mut total = 0;
+    let mut current: Option<(NaiveDateTime, NaiveDateTime)> = None;
+    for (s, e) in sorted {
+        match current {
+            Some((cs, ce)) if s <= ce => current = Some((cs, ce.max(e))),
+            Some((cs, ce)) => {
+                total += (ce - cs).num_seconds();
+                current = Some((s, e));
+            }
+            None => current = Some((s, e)),
+        }
+    }
+    if let Some((cs, ce)) = current {
+        total += (ce - cs).num_seconds();
+    }
+    total
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceTotal {
+    pub id: String,
+    pub name: String,
+    /// `windows` | `android` | … (empty when unknown)
+    pub platform: String,
+    pub active_secs: i64,
+    pub idle_secs: i64,
+    /// When this device's data ends (its last recorded activity in the range).
+    pub last_activity: Option<String>,
+    pub current: bool,
+}
+
+/// Screen time per device in the range, this device first (ignores the device view).
+pub fn device_totals(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<DeviceTotal>> {
+    let me: String = crate::db::get_setting(conn, "device_id")?.unwrap_or_default();
+    let mut map: HashMap<String, DeviceTotal> = HashMap::new();
+    fn entry<'m>(
+        map: &'m mut HashMap<String, DeviceTotal>,
+        me: &str,
+        id: String,
+    ) -> &'m mut DeviceTotal {
+        map.entry(id.clone()).or_insert_with(|| DeviceTotal {
+            current: id == me,
+            id,
+            name: String::new(),
+            platform: String::new(),
+            active_secs: 0,
+            idle_secs: 0,
+            last_activity: None,
+        })
+    }
+    entry(&mut map, &me, me.clone());
+    let mut stmt = conn.prepare(
+        "SELECT device_id, SUM(duration_secs), MAX(end_time) FROM usage_sessions
+         WHERE day BETWEEN ?1 AND ?2 AND device_id IS NOT NULL GROUP BY device_id",
+    )?;
+    for row in stmt.query_map(params![from, to], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })? {
+        let (id, secs, last) = row?;
+        let e = entry(&mut map, &me, id);
+        e.active_secs = secs;
+        e.last_activity = last;
+    }
+    let mut stmt = conn.prepare(
+        "SELECT device_id, SUM(duration_secs) FROM idle_periods
+         WHERE day BETWEEN ?1 AND ?2 AND device_id IS NOT NULL GROUP BY device_id",
+    )?;
+    for row in stmt.query_map(params![from, to], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (id, secs) = row?;
+        entry(&mut map, &me, id).idle_secs = secs;
+    }
+    let mut stmt = conn.prepare("SELECT id, name, platform FROM devices")?;
+    let known: HashMap<String, (String, String)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<DeviceTotal> = map
+        .into_values()
+        .map(|mut d| {
+            if d.current {
+                d.name = crate::sync::device_name(conn);
+                d.platform = "windows".into();
+            } else if let Some((name, platform)) = known.get(&d.id) {
+                d.name = name.clone();
+                d.platform = platform.clone();
+            }
+            if d.name.is_empty() {
+                d.name = "Other device".into();
+            }
+            d
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.current
+            .cmp(&a.current)
+            .then(b.active_secs.cmp(&a.active_secs))
+    });
+    Ok(out)
+}
+
+/// Device IDs for a filter: `all` (None), `desktop`, `mobile`, or one device ID.
+pub fn device_filter(
+    conn: &Connection,
+    filter: Option<&str>,
+) -> rusqlite::Result<Option<Vec<String>>> {
+    let f = match filter {
+        None | Some("") | Some("all") => return Ok(None),
+        Some(f) => f,
+    };
+    if f != "desktop" && f != "mobile" {
+        return Ok(Some(vec![f.to_string()]));
+    }
+    let me: String = crate::db::get_setting(conn, "device_id")?.unwrap_or_default();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT device_id FROM usage_sessions WHERE device_id IS NOT NULL
+         UNION SELECT id FROM devices",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mobile: std::collections::HashSet<String> = conn
+        .prepare("SELECT id FROM devices WHERE platform IN ('android', 'ios')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<String> = ids
+        .into_iter()
+        .chain(std::iter::once(me))
+        .filter(|id| mobile.contains(id) == (f == "mobile"))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(Some(out))
 }
 
 /// Active spans in the range, ordered by start.
@@ -350,11 +526,13 @@ fn spans(
     to: &str,
     own: bool,
 ) -> rusqlite::Result<Vec<(NaiveDateTime, NaiveDateTime)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT start_time, end_time FROM usage_sessions
          WHERE day BETWEEN ?1 AND ?2 AND duration_secs > 0
-           AND (?3 = 0 OR device_id = (SELECT value FROM user_settings WHERE key = 'device_id')) ORDER BY start_time",
-    )?;
+           AND ((?3 = 1 AND device_id = {own}) OR (?3 = 0 AND {view})) ORDER BY start_time",
+        own = crate::db::OWN_DEVICE,
+        view = in_view("device_id")
+    ))?;
     let rows = stmt.query_map(params![from, to, own], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
@@ -484,6 +662,131 @@ mod tests {
             (day.productive_secs, day.distracting_secs, day.neutral_secs),
             (20 * 60, 45 * 60, 10 * 60)
         );
+    }
+
+    #[test]
+    fn device_view_unique_time_and_per_device_totals() {
+        use crate::db;
+        let conn = db::open_in_memory().unwrap();
+        let me = db::get_setting(&conn, "device_id").unwrap().unwrap();
+        let phone = "01a1f48e-0000-7000-8000-000000000002";
+        conn.execute(
+            "INSERT INTO devices (id, name, platform) VALUES (?1, 'Pixel', 'android')",
+            params![phone],
+        )
+        .unwrap();
+        let (app, _) =
+            db::get_or_create_app(&conn, "code.exe", "", || "Code".into(), at(18, 9, 0)).unwrap();
+        // This PC: 09:00–10:00. The phone: 09:30–10:30 (30 min overlap).
+        let id = db::insert_usage(&conn, app, at(18, 9, 0)).unwrap();
+        db::update_span(&conn, db::SpanKind::Usage, id, at(18, 9, 0), at(18, 10, 0)).unwrap();
+        let id = db::insert_usage(&conn, app, at(18, 9, 30)).unwrap();
+        db::update_span(
+            &conn,
+            db::SpanKind::Usage,
+            id,
+            at(18, 9, 30),
+            at(18, 10, 30),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE usage_sessions SET device_id = ?1 WHERE id = ?2",
+            params![phone, id],
+        )
+        .unwrap();
+        let day = "2026-11-18";
+
+        // All devices: combined 2 h, unique 1.5 h.
+        assert_eq!(totals(&conn, day, day).unwrap().0, 7200);
+        assert_eq!(union_secs(&active_spans(&conn, day, day).unwrap()), 5400);
+
+        // One device / desktops / phones.
+        for (filter, secs) in [
+            (Some("mobile"), 3600),
+            (Some("desktop"), 3600),
+            (Some(phone), 3600),
+            (None, 7200),
+        ] {
+            let ids = device_filter(&conn, filter).unwrap();
+            let _view = db::device_view(&conn, ids.as_deref()).unwrap();
+            assert_eq!(totals(&conn, day, day).unwrap().0, secs, "{filter:?}");
+            assert_eq!(
+                app_usage(&conn, day, day).unwrap()[0].secs,
+                secs,
+                "{filter:?}"
+            );
+        }
+        // The view ends with the guard.
+        assert_eq!(totals(&conn, day, day).unwrap().0, 7200);
+
+        let devs = device_totals(&conn, day, day).unwrap();
+        assert_eq!(devs.len(), 2);
+        assert!(devs[0].current && devs[0].id == me, "this device first");
+        assert_eq!(
+            (
+                devs[1].name.as_str(),
+                devs[1].platform.as_str(),
+                devs[1].active_secs
+            ),
+            ("Pixel", "android", 3600)
+        );
+        assert_eq!(
+            devs[1].last_activity.as_deref(),
+            Some("2026-11-18 10:30:00")
+        );
+    }
+
+    /// Real data: `FT_DB_COPY=<copy of a synced profile db> cargo test devices_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn devices_real_database_copy() {
+        use crate::db;
+        let conn = db::open(std::path::Path::new(&std::env::var("FT_DB_COPY").unwrap())).unwrap();
+        let day: String = conn
+            .query_row("SELECT MAX(day) FROM usage_sessions", [], |r| r.get(0))
+            .unwrap();
+        for d in device_totals(&conn, &day, &day).unwrap() {
+            println!(
+                "{} ({}) current={} active={}s last={:?}",
+                d.name, d.platform, d.current, d.active_secs, d.last_activity
+            );
+        }
+        println!(
+            "combined {}s, unique {}s",
+            totals(&conn, &day, &day).unwrap().0,
+            union_secs(&active_spans(&conn, &day, &day).unwrap())
+        );
+        for f in ["desktop", "mobile"] {
+            let ids = device_filter(&conn, Some(f)).unwrap();
+            let _v = db::device_view(&conn, ids.as_deref()).unwrap();
+            println!("{f}: {}s", totals(&conn, &day, &day).unwrap().0);
+        }
+    }
+
+    #[test]
+    fn an_empty_selection_shows_nothing_not_everything() {
+        use crate::db;
+        let conn = db::open_in_memory().unwrap();
+        let (app, _) =
+            db::get_or_create_app(&conn, "code.exe", "", || "Code".into(), at(18, 9, 0)).unwrap();
+        let id = db::insert_usage(&conn, app, at(18, 9, 0)).unwrap();
+        db::update_span(&conn, db::SpanKind::Usage, id, at(18, 9, 0), at(18, 10, 0)).unwrap();
+        let ids = device_filter(&conn, Some("mobile")).unwrap();
+        assert_eq!(ids, Some(vec![]), "no phones");
+        let _view = db::device_view(&conn, ids.as_deref()).unwrap();
+        assert_eq!(totals(&conn, "2026-11-18", "2026-11-18").unwrap().0, 0);
+    }
+
+    #[test]
+    fn union_merges_overlaps_and_touching_spans() {
+        let spans = [
+            (at(18, 9, 0), at(18, 10, 0)),
+            (at(18, 9, 30), at(18, 9, 45)),  // inside
+            (at(18, 10, 0), at(18, 10, 15)), // touching
+            (at(18, 12, 0), at(18, 12, 30)),
+        ];
+        assert_eq!(union_secs(&spans), 75 * 60 + 30 * 60);
+        assert_eq!(union_secs(&[]), 0);
     }
 
     #[test]

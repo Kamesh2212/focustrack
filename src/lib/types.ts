@@ -104,6 +104,20 @@ export interface Dashboard {
   week: DayTotal[];
   hourly: number[];
   live: LiveStatus;
+  uniqueActiveSecs: number;
+  devices: DeviceTotal[];
+  devicesUniqueSecs: number;
+}
+
+/** One device's screen time (Account & Sync). */
+export interface DeviceTotal {
+  id: string;
+  name: string;
+  platform: string;
+  activeSecs: number;
+  idleSecs: number;
+  lastActivity: string | null;
+  current: boolean;
 }
 
 export interface Report {
@@ -128,6 +142,9 @@ export interface Report {
   focusSessions: number;
   hourly: number[];
   heatmap: number[][];
+  uniqueActiveSecs: number;
+  devices: DeviceTotal[];
+  devicesUniqueSecs: number;
 }
 
 export interface SessionRow {

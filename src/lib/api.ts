@@ -40,14 +40,15 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const api = {
-  dashboard: () => call<Dashboard>("get_dashboard"),
+  /** `device`: "all", "desktop", "mobile" or a device id. */
+  dashboard: (device = "all") => call<Dashboard>("get_dashboard", { device }),
   liveStatus: () => call<LiveStatus>("get_live_status"),
   apps: (from: string, to: string) => call<AppUsage[]>("get_apps", { from, to }),
   categories: () => call<Category[]>("get_categories"),
   setAppCategory: (appId: number, categoryId: number | null) =>
     call<void>("set_app_category", { appId, categoryId }),
   renameApp: (appId: number, name: string) => call<void>("rename_app", { appId, name }),
-  report: (from: string, to: string) => call<Report>("get_report", { from, to }),
+  report: (from: string, to: string, device = "all") => call<Report>("get_report", { from, to, device }),
   history: (from: string, to: string, search: string, kind: HistoryKind, limit = 500) =>
     call<SessionRow[]>("get_history", { from, to, search, limit, kind }),
   exportCsv: (from: string, to: string, search: string, kind: HistoryKind) =>
