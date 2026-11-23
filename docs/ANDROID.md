@@ -70,5 +70,5 @@ Debug builds keep WebView debugging on: `chrome://inspect` on the PC shows the a
 
 If `adb devices` shows the emulator as `unauthorized`, adb and the emulator are using different keys (the emulator
 uses the folder in `ANDROID_SDK_HOME`, recent adb ignores it). Start the adb server with that key:
-`$env:ADB_VENDOR_KEYS = "C:\Android\.androiddbkey"; adb kill-server; adb start-server`. Use the SDK's own
+`$env:ADB_VENDOR_KEYS = "C:\Android\.android\adbkey"; adb kill-server; adb start-server`. Use the SDK's own
 `platform-toolsdb.exe` only: an older adb on `PATH` keeps replacing the server.
