@@ -27,6 +27,9 @@ All notable changes to this project are documented here. The format follows
   15 seconds while such a session runs), show the same timer and apply the same blocking profile. Ending it on
   any device, following the profile's rules, ends it everywhere. The session is recorded once, on the device
   that started it. Database schema v10.
+- **Goals across devices** (#72): goal progress counts every synced device, and with more than one device
+  each goal shows how much came from each. "Goal achieved", "goal missed" and the evening reminder appear on
+  one device only. Changing a goal lets it notify again. Database schema v11.
 
 ## [1.2.0] - 2026-11-19
 

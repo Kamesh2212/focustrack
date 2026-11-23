@@ -16,7 +16,7 @@ pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 300;
 
 /// The newest schema version `migrate` produces.
 #[cfg(test)]
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub fn fmt_time(t: NaiveDateTime) -> String {
     t.format(TIME_FMT).to_string()
@@ -290,6 +290,27 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
+    if version < 11 {
+        // Notifications shown on one device and not repeated on the others (#72).
+        let sql = format!(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS shared_notices (
+                 id  INTEGER PRIMARY KEY,
+                 key TEXT NOT NULL,
+                 day TEXT NOT NULL,
+                 UNIQUE (key, day)
+             );
+             {}
+             PRAGMA user_version = 11;
+             COMMIT;",
+            sync_table_sql("shared_notices", true)
+        );
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last
     // saved — except the one about to be resumed (#12), which focus.rs handles.
     conn.execute(
@@ -317,6 +338,7 @@ pub const SHARED_TABLES: &[&str] = &[
     "goal_checks",
     "block_profiles",
     "focus_runs",
+    "shared_notices",
 ];
 
 /// The built-in blocking profiles, as first created (schema v4).
@@ -495,6 +517,7 @@ fn sync_table_sql(table: &str, shared: bool) -> String {
                 "goals" => "goal",
                 "block_profiles" => "profile",
                 "focus_runs" => "focus_run",
+                "shared_notices" => "notice",
                 _ => "goal_check",
             };
             sql += &format!(
@@ -901,6 +924,26 @@ pub fn mark_notified(conn: &Connection, key: &str, day: &str) -> rusqlite::Resul
     Ok(n == 1)
 }
 
+/// Like `mark_notified`, but also for every other synced device: false if
+/// this device or another one already showed it (`shared_key` names it the
+/// same way on every device).
+pub fn mark_notified_everywhere(
+    conn: &Connection,
+    key: &str,
+    shared_key: &str,
+    day: &str,
+) -> rusqlite::Result<bool> {
+    if !mark_notified(conn, key, day)? {
+        return Ok(false);
+    }
+    let id = focustrack_sync_proto::name_id("notice", &format!("{shared_key}|{day}"));
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO shared_notices (key, day, uuid) VALUES (?1, ?2, ?3)",
+        params![shared_key, day, id],
+    )?;
+    Ok(n == 1)
+}
+
 pub fn clear_limit_notifications(conn: &Connection, limit_id: i64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM sent_notifications WHERE key LIKE ?1",
@@ -1093,7 +1136,7 @@ mod tests {
             // Turn a fresh database back into v8, with Work Mode edited by the user.
             let conn = open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE focus_runs; DROP TRIGGER block_profiles_sync_ins; DROP TRIGGER block_profiles_sync_upd;
+                "DROP TABLE focus_runs; DROP TABLE shared_notices; DROP TRIGGER block_profiles_sync_ins; DROP TRIGGER block_profiles_sync_upd;
                  DROP TRIGGER block_profiles_sync_del; DROP TRIGGER applications_cat_upd;
                  DROP TRIGGER websites_cat_upd;
                  DROP INDEX idx_block_profiles_uuid; DROP INDEX idx_block_profiles_pending;

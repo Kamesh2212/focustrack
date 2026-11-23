@@ -468,14 +468,25 @@ fn check(
         }
         return Ok(());
     }
+    // Goal notifications go to one device only, whichever gets there first (#72).
     let goals = crate::goals::goal_status(conn, &day)?;
+    let mut once: Vec<(Notice, String)> = Vec::new();
     for g in &goals {
         if let Some((key, title, body)) = crate::goals::goal_notice(g) {
-            notices.push(Notice { key, title, body });
+            let shared = key.replacen(&format!("goal:{}:", g.id), &format!("goal:{}:", g.uuid), 1);
+            once.push((Notice { key, title, body }, shared));
         }
     }
     let settings = db::load_settings(conn)?;
-    notices.extend(goal_reminder(&goals, now, &settings.goal_reminder));
+    if let Some(n) = goal_reminder(&goals, now, &settings.goal_reminder) {
+        let shared = n.key.clone();
+        once.push((n, shared));
+    }
+    for (n, shared) in once {
+        if db::mark_notified_everywhere(conn, &n.key, &shared, &day)? {
+            notify(app, &n.title, &n.body);
+        }
+    }
     // Break reminders are about this computer, not the phone.
     let spans = analytics::own_active_spans(conn, &day, &day)?;
     notices.extend(break_notice(
@@ -716,6 +727,8 @@ mod tests {
     #[test]
     fn goal_reminder_lists_pending_goals_after_set_time() {
         let g = |label: &str, state: &str| crate::goals::GoalStatus {
+            uuid: String::new(),
+            by_device: Vec::new(),
             id: 1,
             kind: "custom".into(),
             category_id: None,

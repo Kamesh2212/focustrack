@@ -44,6 +44,11 @@ function GoalRow({ g, onToggle }: { g: GoalStatus; onToggle: (g: GoalStatus) => 
       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
         <div className={cx("h-full rounded-full", tone)} style={{ width: `${Math.max(2, pct)}%` }} />
       </div>
+      {g.byDevice.length > 1 && (
+        <div className="tabular mt-1 text-xs text-slate-500">
+          {g.byDevice.map((d) => `${d.name} ${g.kind === "min_focus_sessions" ? d.current : fmtDuration(d.current)}`).join(" · ")}
+        </div>
+      )}
     </div>
   );
 }

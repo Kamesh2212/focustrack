@@ -717,6 +717,34 @@ fn collect_pending(
         );
     }
 
+    // Notifications already shown on a device (#72).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, key, day FROM shared_notices WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            s(r, 4)?,
+            json!({ "key": s(r, 3)?, "day": s(r, 4)? }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, day, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::NOTICE,
+            day,
+            v,
+            h,
+            false,
+            body,
+            Source::Table("shared_notices"),
+        );
+    }
+
     // Categories the user picked for apps and websites (#62).
     let mut stmt = conn.prepare(
         "SELECT a.app_key, a.cat_version, a.cat_hlc, a.exe_name, COALESCE(a.exe_path, ''), a.display_name, c.name
@@ -787,6 +815,7 @@ fn collect_pending(
             "goal" => kind::GOAL,
             "profile" => kind::PROFILE,
             "focus_run" => kind::FOCUS_RUN,
+            "notice" => kind::NOTICE,
             _ => kind::GOAL_CHECK,
         };
         seal(
@@ -909,6 +938,7 @@ fn table_for(k: &str) -> Option<&'static str> {
         kind::GOAL_CHECK => "goal_checks",
         kind::PROFILE => "block_profiles",
         kind::FOCUS_RUN => "focus_runs",
+        kind::NOTICE => "shared_notices",
         _ => return None,
     })
 }
@@ -1190,6 +1220,16 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                  ON CONFLICT(goal_id, day) DO UPDATE SET uuid = excluded.uuid, device_id = excluded.device_id,
                      version = excluded.version, synced_version = excluded.synced_version, hlc = excluded.hlc",
                 params![goal, str_of(b, "day"), env.id, dev, v, env.hlc],
+            )?;
+        }
+        kind::NOTICE => {
+            conn.execute(
+                "INSERT INTO shared_notices (key, day, uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+                 ON CONFLICT(uuid) DO UPDATE SET device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc
+                 ON CONFLICT(key, day) DO NOTHING",
+                params![str_of(b, "key"), str_of(b, "day"), env.id, dev, v, env.hlc],
             )?;
         }
         kind::FOCUS_RUN => {
@@ -2973,6 +3013,69 @@ mod tests {
         b.sync();
         assert!(focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none());
         assert!(focus::status(&sb).unwrap().run.is_none());
+    }
+
+    #[test]
+    fn goals_combine_devices_and_notify_once() {
+        let (mut a, mut b) = pair();
+        // "Study at least 1 hour", made on the laptop.
+        a.conn
+            .execute(
+                "INSERT INTO goals (kind, category_id, target, enabled)
+                 VALUES ('min_category', (SELECT id FROM categories WHERE name = 'Study'), 3600, 1)",
+                [],
+            )
+            .unwrap();
+        // 40 minutes of Anki on the laptop, 30 on the phone.
+        let study = "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Study')";
+        a.use_app("anki.exe", (9, 0), (9, 40));
+        a.conn.execute(study, []).unwrap();
+        b.use_app("com.ichi2.anki", (10, 0), (10, 30));
+        b.conn.execute(study, []).unwrap();
+        a.sync();
+        b.sync();
+        a.sync();
+
+        let day = today();
+        for (n, d) in [("A", &a), ("B", &b)] {
+            let g = &crate::goals::goal_status(&d.conn, &day).unwrap()[0];
+            assert_eq!(
+                (g.current, g.state.as_str()),
+                (70 * 60, "achieved"),
+                "{n}: combined"
+            );
+            let parts: Vec<(&str, i64)> = g
+                .by_device
+                .iter()
+                .map(|p| (p.name.as_str(), p.current))
+                .collect();
+            assert_eq!(
+                parts,
+                [("Laptop", 40 * 60), ("Desktop", 30 * 60)],
+                "{n}: per device"
+            );
+        }
+
+        // The "goal achieved" notification: shown on the first device only.
+        let g = &crate::goals::goal_status(&a.conn, &day).unwrap()[0];
+        let (key, _, _) = crate::goals::goal_notice(g).unwrap();
+        let shared = format!("goal:{}:achieved", g.uuid);
+        assert!(db::mark_notified_everywhere(&a.conn, &key, &shared, &day).unwrap());
+        assert!(!db::mark_notified_everywhere(&a.conn, &key, &shared, &day).unwrap());
+        a.sync();
+        b.sync();
+        let gb = &crate::goals::goal_status(&b.conn, &day).unwrap()[0];
+        let (key_b, _, _) = crate::goals::goal_notice(gb).unwrap();
+        assert!(
+            !db::mark_notified_everywhere(
+                &b.conn,
+                &key_b,
+                &format!("goal:{}:achieved", gb.uuid),
+                &day
+            )
+            .unwrap(),
+            "the phone doesn't repeat it"
+        );
     }
 
     #[test]

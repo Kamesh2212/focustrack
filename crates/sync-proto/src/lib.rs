@@ -58,6 +58,9 @@ pub mod kind {
     pub const LIMIT_EXTENSION: &str = "limit_extension";
     pub const DEVICE_CONTROL: &str = "device_control";
     pub const PURGE: &str = "purge";
+    /// "This notification was shown" (goal achieved, evening reminder), so
+    /// only one device shows it (#72).
+    pub const NOTICE: &str = "notice";
 
     pub const ALL: &[&str] = &[
         DEVICE,
@@ -78,6 +81,7 @@ pub mod kind {
         LIMIT_EXTENSION,
         DEVICE_CONTROL,
         PURGE,
+        NOTICE,
     ];
 
     /// Shared definitions: any device of the account may write them, and the
@@ -97,6 +101,7 @@ pub mod kind {
                 | LIMIT_EXTENSION
                 | DEVICE_CONTROL
                 | PURGE
+                | NOTICE
         )
     }
 

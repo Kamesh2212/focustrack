@@ -317,6 +317,8 @@ export interface GoalStatus {
   current: number;
   state: "achieved" | "in_progress" | "on_track" | "exceeded";
   label: string;
+  /** With several synced devices: each device's part of `current`. */
+  byDevice: { id: string; name: string; current: number }[];
 }
 
 export interface Insight {

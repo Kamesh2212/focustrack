@@ -33,6 +33,19 @@ pub struct GoalStatus {
     /// `achieved` | `in_progress` | `on_track` | `exceeded`
     pub state: String,
     pub label: String,
+    /// The same on every synced device (for notifications shown once).
+    #[serde(skip)]
+    pub uuid: String,
+    /// With several synced devices: each one's part of `current` (#72).
+    pub by_device: Vec<DeviceProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceProgress {
+    pub id: String,
+    pub name: String,
+    pub current: i64,
 }
 
 fn fmt(secs: i64) -> String {
@@ -90,11 +103,12 @@ pub fn state(kind: &str, current: i64, target: i64) -> &'static str {
 /// Time in a category today: its (non-browser) apps plus its websites.
 /// Browser time is left out of the app part so it isn't counted twice.
 pub fn category_secs(conn: &Connection, day: &str, category_id: i64) -> rusqlite::Result<i64> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT a.exe_name, COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
-         JOIN applications a ON a.id = s.app_id
-         WHERE s.day = ?1 AND a.category_id = ?2 GROUP BY a.id",
-    )?;
+             JOIN applications a ON a.id = s.app_id
+             WHERE s.day = ?1 AND a.category_id = ?2 AND {} GROUP BY a.id",
+        crate::db::in_view("s.device_id")
+    ))?;
     let rows = stmt.query_map(params![day, category_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
     })?;
@@ -106,8 +120,11 @@ pub fn category_secs(conn: &Connection, day: &str, category_id: i64) -> rusqlite
         }
     }
     let web: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
-         JOIN websites w ON w.id = s.website_id WHERE s.day = ?1 AND w.category_id = ?2",
+        &format!(
+            "SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
+             JOIN websites w ON w.id = s.website_id WHERE s.day = ?1 AND w.category_id = ?2 AND {}",
+            crate::db::in_view("s.device_id")
+        ),
         params![day, category_id],
         |r| r.get(0),
     )?;
@@ -117,7 +134,7 @@ pub fn category_secs(conn: &Connection, day: &str, category_id: i64) -> rusqlite
 pub fn goal_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<GoalStatus>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.kind, g.category_id, c.name, COALESCE(c.color, '#6366f1'), g.target, g.enabled, g.title,
-                EXISTS (SELECT 1 FROM goal_checks k WHERE k.goal_id = g.id AND k.day = ?1)
+                EXISTS (SELECT 1 FROM goal_checks k WHERE k.goal_id = g.id AND k.day = ?1), COALESCE(g.uuid, '')
          FROM goals g LEFT JOIN categories c ON c.id = g.category_id ORDER BY g.id",
     )?;
     type Row = (
@@ -130,6 +147,7 @@ pub fn goal_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<GoalSta
         bool,
         Option<String>,
         bool,
+        String,
     );
     let rows: Vec<Row> = stmt
         .query_map(params![day], |r| {
@@ -143,28 +161,63 @@ pub fn goal_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<GoalSta
                 r.get::<_, i64>(6)? != 0,
                 r.get(7)?,
                 r.get::<_, i64>(8)? != 0,
+                r.get(9)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
 
-    let (active, idle) = analytics::totals(conn, day, day)?;
-    let (_, focus_done) = focus::totals(conn, day, day)?;
-    let mut out = Vec::new();
-    for (id, kind, category_id, category, color, target, enabled, title, checked) in rows {
-        let (current, target) = match kind.as_str() {
-            "custom" => (checked as i64, 1),
-            _ => (0, target),
-        };
-        let current = match kind.as_str() {
-            "custom" => current,
-            "max_screen" => active + idle,
-            "min_focus_sessions" => focus_done,
+    // Progress counts every synced device's data (#72); with more than one
+    // device, also each device's part.
+    let measure = |kind: &str, category_id: Option<i64>| -> rusqlite::Result<i64> {
+        Ok(match kind {
+            "max_screen" => {
+                let (active, idle) = analytics::totals(conn, day, day)?;
+                active + idle
+            }
+            "min_focus_sessions" => focus::totals(conn, day, day)?.1,
             _ => match category_id {
                 Some(c) => category_secs(conn, day, c)?,
                 None => 0,
             },
+        })
+    };
+    let devices = synced_devices(conn)?;
+    let mut parts: Vec<Vec<DeviceProgress>> = vec![Vec::new(); rows.len()];
+    if devices.len() > 1 {
+        for (dev, name) in &devices {
+            let _view = crate::db::device_view(conn, Some(std::slice::from_ref(dev)))?;
+            for (i, row) in rows.iter().enumerate() {
+                if row.1 != "custom" {
+                    let current = measure(&row.1, row.2)?;
+                    if current > 0 {
+                        parts[i].push(DeviceProgress {
+                            id: dev.clone(),
+                            name: name.clone(),
+                            current,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (
+        (id, kind, category_id, category, color, target, enabled, title, checked, uuid),
+        mut by_device,
+    ) in rows.into_iter().zip(parts)
+    {
+        let (current, target) = match kind.as_str() {
+            "custom" => (checked as i64, 1),
+            _ => (measure(&kind, category_id)?, target),
         };
+        // One device alone isn't worth a breakdown.
+        if by_device.len() < 2 {
+            by_device.clear();
+        }
+        by_device.sort_by_key(|d| std::cmp::Reverse(d.current));
         out.push(GoalStatus {
+            uuid,
+            by_device,
             label: label(&kind, category.as_deref(), target, title.as_deref()),
             title,
             state: state(&kind, current, target).to_string(),
@@ -177,6 +230,18 @@ pub fn goal_status(conn: &Connection, day: &str) -> rusqlite::Result<Vec<GoalSta
             enabled,
             current,
         });
+    }
+    Ok(out)
+}
+
+/// This device and the other synced devices: (id, name).
+fn synced_devices(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let me = crate::db::get_setting(conn, "device_id")?.unwrap_or_default();
+    let mut out = vec![(me.clone(), crate::sync::device_name(conn))];
+    let mut stmt = conn.prepare("SELECT id, name FROM devices WHERE id != ?1 ORDER BY name")?;
+    let rows = stmt.query_map(params![me], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    for row in rows {
+        out.push(row?);
     }
     Ok(out)
 }

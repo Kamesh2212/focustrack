@@ -85,12 +85,12 @@ const focusHistory = [
 ];
 
 let goals: GoalStatus[] = [
-  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, title: null, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h" },
-  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, title: null, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education" },
-  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, title: null, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m" },
-  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, title: null, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions" },
-  { id: 5, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Read 20 pages", enabled: true, current: 0, state: "in_progress", label: "Read 20 pages" },
-  { id: 6, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Exercise for 30 minutes", enabled: true, current: 1, state: "achieved", label: "Exercise for 30 minutes" },
+  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, title: null, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h", byDevice: [] },
+  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, title: null, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education", byDevice: [{ id: "d0", name: "This PC", current: 1800 }, { id: "d3", name: "Pixel 8", current: 900 }] },
+  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, title: null, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m", byDevice: [] },
+  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, title: null, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions", byDevice: [] },
+  { id: 5, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Read 20 pages", enabled: true, current: 0, state: "in_progress", label: "Read 20 pages", byDevice: [] },
+  { id: 6, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Exercise for 30 minutes", enabled: true, current: 1, state: "achieved", label: "Exercise for 30 minutes", byDevice: [] },
 ];
 let nextGoalId = 7;
 
@@ -649,7 +649,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         const cat = CATEGORIES.find((c) => c.id === g.categoryId) ?? null;
         const base = { ...g, category: cat?.name ?? null, color: cat?.color ?? "#6366f1", label: g.kind === "custom" ? g.title ?? "" : g.title ? `${g.title}` : goalLabel(g.kind, cat?.name ?? null, g.target) };
         if (g.id) goals = goals.map((x) => (x.id === g.id ? { ...x, ...base } : x));
-        else goals.push({ ...base, id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
+        else goals.push({ ...base, byDevice: [], id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
         return null;
       }
       case "delete_goal":

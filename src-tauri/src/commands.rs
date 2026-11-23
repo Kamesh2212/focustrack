@@ -1073,6 +1073,12 @@ pub fn set_goal(
                 params![format!("goal:{id}:%")],
             )
             .map_err(err)?;
+            // The changed goal may be achieved again, on any device.
+            conn.execute(
+                "DELETE FROM shared_notices WHERE key LIKE 'goal:' || (SELECT uuid FROM goals WHERE id = ?1) || ':%'",
+                params![id],
+            )
+            .map_err(err)?;
         }
         None => {
             conn.execute(
