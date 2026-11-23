@@ -1,0 +1,8 @@
+# HTTPS in front of the sync server. Caddy gets and renews the certificate itself.
+{$SYNC_SITE} {
+	encode gzip
+	request_body {
+		max_size 8MB
+	}
+	reverse_proxy focustrack-sync:8787
+}

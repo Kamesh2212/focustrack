@@ -26,6 +26,21 @@ const AUTH_PER_MINUTE: u32 = 20;
 pub struct Config {
     /// Behind a reverse proxy (Caddy): take the client IP from X-Forwarded-For.
     pub trust_proxy: bool,
+    /// Most bytes of records one account may store (keeps one account from
+    /// filling the server's disk).
+    pub quota_bytes: i64,
+    /// Sign-ups stop once the server has this many accounts.
+    pub max_accounts: i64,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            trust_proxy: false,
+            quota_bytes: 500 * 1024 * 1024,
+            max_accounts: 1000,
+        }
+    }
 }
 
 pub struct AppState {
@@ -99,7 +114,8 @@ fn client_ip(st: &Shared, headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
         if let Some(ip) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
+            // The proxy adds the address it saw last; earlier entries come from the client.
+            .and_then(|v| v.rsplit(',').next())
             .and_then(|v| v.trim().parse().ok())
         {
             return ip;
@@ -243,6 +259,13 @@ async fn signup(
     rate_limit(&st, client_ip(&st, &headers, peer))?;
     let email = normalise_email(&req.email)?;
     check_device(&req.device)?;
+    let max = st.config.max_accounts;
+    if db(&st, store::account_count).await? >= max {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This sync server isn't accepting new accounts right now",
+        ));
+    }
     check_secret_field("auth key", &req.auth_key, 100)?;
     check_secret_field("salt", &req.salt, 100)?;
     check_secret_field("wrapped key", &req.wrapped_key, 200)?;
@@ -336,8 +359,11 @@ async fn signin(
 
 async fn refresh(
     State(st): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RefreshRequest>,
 ) -> ApiResult<AccessToken> {
+    rate_limit(&st, client_ip(&st, &headers, peer))?;
     uuid_ok(&req.device_id)?;
     let token = db(&st, move |c| {
         store::refresh(c, &req.device_id, &req.refresh_token)
@@ -352,9 +378,11 @@ async fn refresh(
 
 async fn change_password(
     State(st): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> ApiResult<serde_json::Value> {
+    rate_limit(&st, client_ip(&st, &headers, peer))?;
     let (account, _) = auth(&st, &headers).await?;
     check_secret_field("auth key", &req.new_auth_key, 100)?;
     check_secret_field("salt", &req.new_salt, 100)?;
@@ -418,8 +446,9 @@ async fn push(
             "at most {MAX_BATCH} records per push"
         )));
     }
+    let quota = st.config.quota_bytes;
     let (acked, rejected) = db(&st, move |c| {
-        store::push(c, &account, &device, &req.records)
+        store::push(c, &account, &device, &req.records, quota)
     })
     .await?;
     Ok(Json(PushResponse { acked, rejected }))
@@ -548,9 +577,11 @@ fn spawn_retention_sweeper(st: Shared) {
 
 async fn delete_account(
     State(st): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<DeleteAccountRequest>,
 ) -> ApiResult<serde_json::Value> {
+    rate_limit(&st, client_ip(&st, &headers, peer))?;
     let (account, _) = auth(&st, &headers).await?;
     db(&st, move |c| {
         let Some(acc) = store::account_by_id(c, &account)? else {

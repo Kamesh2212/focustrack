@@ -10,6 +10,10 @@ use serde_json::{json, Value};
 
 /// Starts a server with an in-memory database; returns its base URL.
 fn start() -> String {
+    start_with(Config::default())
+}
+
+fn start_with(config: Config) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -17,13 +21,9 @@ fn start() -> String {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(listener.local_addr().unwrap()).unwrap();
             let conn = store::open(":memory:").unwrap();
-            serve(
-                listener,
-                app(conn, Config { trust_proxy: false }),
-                std::future::pending(),
-            )
-            .await
-            .unwrap();
+            serve(listener, app(conn, config), std::future::pending())
+                .await
+                .unwrap();
         });
     });
     format!("http://{}", rx.recv().unwrap())
@@ -551,4 +551,87 @@ fn day_string(days: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[test]
+fn an_account_cant_store_more_than_its_quota() {
+    let base = start_with(Config {
+        quota_bytes: 1000,
+        ..Config::default()
+    });
+    let pc = signup(&base, "q@example.com", "pw-one-two-three");
+    let mut stored = 0;
+    let mut refused = 0;
+    for i in 0..20 {
+        let r = pc
+            .client
+            .push(&[usage(&pc, &new_id(), 1, "2026-11-19", i)])
+            .unwrap();
+        stored += r.acked.len();
+        if let Some(x) = r.rejected.first() {
+            assert_eq!(x.reason, "storage quota reached");
+            refused += 1;
+        }
+    }
+    assert!(
+        stored > 0 && refused > 0,
+        "stored {stored}, refused {refused}"
+    );
+    // Updating a stored record to the same size still works when full.
+    let got = pull_all(&signin(
+        &base,
+        "q@example.com",
+        "pw-one-two-three",
+        "android",
+    ));
+    assert_eq!(got.len(), stored);
+}
+
+#[test]
+fn sign_ups_stop_at_the_account_limit() {
+    let base = start_with(Config {
+        max_accounts: 2,
+        ..Config::default()
+    });
+    signup(&base, "m1@example.com", "pw-one-two-three");
+    signup(&base, "m2@example.com", "pw-one-two-three");
+    let mut c = Client::new(&base);
+    let e = client::signup(
+        &mut c,
+        "m3@example.com",
+        "pw-one-two-three",
+        KdfParams::insecure_for_tests(),
+        device("windows"),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.status(), Some(503));
+    // Existing accounts still sign in.
+    signin(&base, "m1@example.com", "pw-one-two-three", "android");
+}
+
+/// Against a deployed server (after `deploy/deploy.sh`):
+/// `FT_LIVE_URL=https://sync.140-238-91-202.sslip.io cargo test --test e2e live -- --ignored`
+/// Signs up a throwaway account, syncs between two devices, then deletes it.
+#[test]
+#[ignore]
+fn live_server_round_trip() {
+    let base = std::env::var("FT_LIVE_URL").expect("set FT_LIVE_URL");
+    let email = format!("live-check-{}@example.com", &new_id()[..8]);
+    let pw = "live-check-password-123";
+    let pc = signup(&base, &email, pw);
+    let phone = signin(&base, &email, pw, "android");
+    let id = new_id();
+    let r = pc
+        .client
+        .push(&[usage(&pc, &id, 1, "2026-11-23", 42)])
+        .unwrap();
+    assert_eq!(r.acked.len(), 1);
+    let got = pull_all(&phone);
+    assert_eq!(got.len(), 1, "the phone reads the PC's record");
+    assert_eq!(got[0].1["secs"], 42, "and decrypts it");
+    let params = pc.client.auth_params(&email).unwrap();
+    let master =
+        focustrack_sync_proto::crypto::MasterKey::derive(pw, &params.salt, &params.kdf).unwrap();
+    pc.client.delete_account(&master.auth_key()).unwrap();
 }

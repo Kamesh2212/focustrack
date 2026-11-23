@@ -1,0 +1,12 @@
+# Use the server's shared Caddy (the exchange project's) instead of our own:
+# the sync server joins its network, and deploy.sh adds a site file to the
+# folder that Caddy imports (~/caddy-extra/focustrack.caddy).
+services:
+  sync:
+    networks:
+      - edge
+
+networks:
+  edge:
+    name: exchange_default
+    external: true

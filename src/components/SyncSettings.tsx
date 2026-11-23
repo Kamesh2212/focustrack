@@ -5,8 +5,8 @@ import { useLoad } from "../lib/hooks";
 import type { SyncDevice, SyncStatus } from "../lib/types";
 import { Button, Card, ConfirmButton, ErrorNote, Toggle, cx } from "./ui";
 
-/** Until the hosted service exists, sync talks to a server on this computer. */
-const DEFAULT_SERVER = "http://127.0.0.1:8787";
+/** FocusTrack's hosted sync server (preview, on the project's own cloud server). */
+const DEFAULT_SERVER = "https://sync.140-238-91-202.sslip.io";
 
 const field =
   "w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900";
@@ -156,8 +156,8 @@ function SignInForm({ status, onSignedIn }: { status: SyncStatus; onSignedIn: (r
           <summary className="cursor-pointer text-slate-500">Server</summary>
           <input value={server} onChange={(e) => setServer(e.target.value)} className={cx(field, "mt-1.5 font-mono")} />
           <p className="mt-1 text-xs text-slate-500">
-            The FocusTrack sync server you run yourself: <code>http://127.0.0.1:8787</code> on the computer running it, or its
-            home-network address (e.g. <code>http://192.168.1.20:8787</code>) from your other devices.
+            FocusTrack&apos;s sync server is filled in. To use one you run yourself, enter its address: an <code>https://</code>{" "}
+            address, or on your home network e.g. <code>http://192.168.1.20:8787</code>.
           </p>
         </details>
         <ErrorNote error={error} />

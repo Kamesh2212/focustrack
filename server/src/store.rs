@@ -370,14 +370,26 @@ pub fn delete_account(conn: &Connection, account: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-/// Stores a batch of records for `device` (design §6.2). Idempotent.
+/// How many accounts the server has.
+pub fn account_count(conn: &mut Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+}
+
+/// Stores a batch of records for `device` (design §6.2). Idempotent. A record
+/// that would take the account past `quota` bytes is rejected.
 pub fn push(
     conn: &mut Connection,
     account: &str,
     device: &str,
     records: &[Envelope],
+    quota: i64,
 ) -> rusqlite::Result<(Vec<Ack>, Vec<Rejected>)> {
     let tx = conn.transaction()?;
+    let mut used: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(length(payload)), 0) FROM records WHERE account = ?1",
+        params![account],
+        |r| r.get(0),
+    )?;
     let mut acked = Vec::new();
     let mut rejected = Vec::new();
     for env in records {
@@ -395,14 +407,14 @@ pub fn push(
             continue;
         }
         let shared = kind::is_shared(&env.kind);
-        let existing: Option<(String, String, i64, Option<String>)> = tx
+        let existing: Option<(String, String, i64, Option<String>, i64)> = tx
             .query_row(
-                "SELECT kind, device, version, hlc FROM records WHERE account = ?1 AND id = ?2",
+                "SELECT kind, device, version, hlc, length(payload) FROM records WHERE account = ?1 AND id = ?2",
                 params![account, env.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        if let Some((k, owner, version, hlc_old)) = &existing {
+        if let Some((k, owner, version, hlc_old, _)) = &existing {
             if *k != env.kind {
                 rejected.push(reject("record kind can't change"));
                 continue;
@@ -428,6 +440,12 @@ pub fn push(
                 continue;
             }
         }
+        let grow = env.payload.len() as i64 - existing.as_ref().map_or(0, |e| e.4);
+        if grow > 0 && used + grow > quota {
+            rejected.push(reject("storage quota reached"));
+            continue;
+        }
+        used += grow;
         let seq: i64 = tx.query_row(
             "UPDATE accounts SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
             params![account],

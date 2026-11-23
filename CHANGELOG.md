@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Hosted sync server**: the apps now sync through FocusTrack's server at https://sync.140-238-91-202.sslip.io
+  by default (you can still enter your own). Deployed with Docker and Caddy (HTTPS), with daily backups; see
+  [docs/DEPLOY.md](docs/DEPLOY.md).
+- Sync server: per-account storage quota (`FT_SYNC_QUOTA_MB`, default 500), a cap on accounts
+  (`FT_SYNC_MAX_ACCOUNTS`, default 1000), rate limits also on token refresh, password change and account
+  deletion, and `focustrack-server backup <file>`.
 - **Your synced data** (Settings → Account & Sync, #67): export everything in your account as decrypted JSON;
   choose how long the server keeps history (30 days to 2 years, or forever); delete synced history (everything
   or older than a period) from the server and all your devices; delete one device's history; delete the
@@ -44,6 +50,9 @@ All notable changes to this project are documented here. The format follows
   hard work, patience or not giving up, and blocked-app notifications add one when it fits. Never the same one
   twice in a row; turn them off under Settings → Show motivational quotes. The first 25 quotes, each with a
   checked source, are in `quotes/quotes.json` (built into the app; the extension gets its quote from the app).
+
+### Security
+- Sync server: behind a proxy, rate limits use the address the proxy saw, not one the client could make up.
 
 ## [1.2.0] - 2026-11-19
 
