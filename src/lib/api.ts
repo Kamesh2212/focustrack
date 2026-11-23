@@ -81,7 +81,8 @@ export const api = {
   installedApps: () => call<InstalledApp[]>("get_installed_apps"),
   ensureApp: (a: InstalledApp) => call<number>("ensure_app", { exeName: a.exeName, name: a.name, path: a.path }),
   focus: (mode?: "focus" | "study") => call<FocusOverview>("get_focus", { mode: mode ?? null }),
-  startFocus: (plan: FocusPlan) => call<FocusStatus>("start_focus", { plan }),
+  /** `devices`: other devices to run it on too (IDs, or "*" for all). */
+  startFocus: (plan: FocusPlan, devices: string[] = []) => call<FocusStatus>("start_focus", { plan, devices }),
   stopFocus: (phrase?: string) => call<void>("stop_focus", { phrase: phrase ?? null }),
   requestStopFocus: () => call<number>("request_stop_focus"),
   previewProfile: (profileId: number) => call<BlockPreview>("preview_profile", { profileId }),

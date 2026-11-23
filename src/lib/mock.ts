@@ -165,7 +165,7 @@ function stamp(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function startFocus(plan: FocusPlan): FocusStatus {
+function startFocus(plan: FocusPlan, devices: string[] = []): FocusStatus {
   const start = new Date();
   const end = new Date(start.getTime() + plan.focusMins * 60000);
   focusActive = {
@@ -178,6 +178,7 @@ function startFocus(plan: FocusPlan): FocusStatus {
     preview: plan.profileId != null ? previewFor(plan.profileId) : null,
     endEarly: profiles.find((p) => p.id === plan.profileId)?.endEarly ?? "allow",
     stopWaitSecs: null,
+    run: devices.length ? { id: "run1", joined: false, origin: "This PC", devices } : null,
   };
   return focusActive;
 }
@@ -482,7 +483,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return { active: focusActive, todaySecs: 3000, todaySessions: 1, weekSecs: 6900, weekSessions: 2, streakDays: 2, history: hist, stopPhrase: "I want to stop" };
       }
       case "start_focus":
-        return startFocus(a.plan);
+        return startFocus(a.plan, (a.devices as string[] | undefined) ?? []);
       case "stop_focus": {
         const rule = focusActive?.endEarly ?? "allow";
         if (rule !== "allow" && String(a.phrase ?? "").trim().toLowerCase() !== "i want to stop")

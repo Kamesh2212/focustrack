@@ -16,7 +16,7 @@ pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 300;
 
 /// The newest schema version `migrate` produces.
 #[cfg(test)]
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub fn fmt_time(t: NaiveDateTime) -> String {
     t.format(TIME_FMT).to_string()
@@ -263,6 +263,33 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v9(conn)?;
     }
 
+    if version < 10 {
+        // Focus sessions shared between devices (#71). Times are Unix seconds,
+        // so devices in other time zones agree.
+        let sql = format!(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS focus_runs (
+                 id              INTEGER PRIMARY KEY,
+                 plan            TEXT NOT NULL,
+                 profile_uuid    TEXT,
+                 start_utc       INTEGER NOT NULL,
+                 planned_end_utc INTEGER NOT NULL,
+                 devices         TEXT NOT NULL DEFAULT '[]',
+                 origin          TEXT NOT NULL,
+                 ended_utc       INTEGER,
+                 ended_early     INTEGER NOT NULL DEFAULT 0
+             );
+             {}
+             PRAGMA user_version = 10;
+             COMMIT;",
+            sync_table_sql("focus_runs", true)
+        );
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last
     // saved — except the one about to be resumed (#12), which focus.rs handles.
     conn.execute(
@@ -284,7 +311,13 @@ pub const OWNED_TABLES: &[&str] = &[
     "focus_sessions",
 ];
 /// Tables any device may edit; the newest edit (by `hlc`) wins.
-pub const SHARED_TABLES: &[&str] = &["usage_limits", "goals", "goal_checks", "block_profiles"];
+pub const SHARED_TABLES: &[&str] = &[
+    "usage_limits",
+    "goals",
+    "goal_checks",
+    "block_profiles",
+    "focus_runs",
+];
 
 /// The built-in blocking profiles, as first created (schema v4).
 const BUILTIN_PROFILES: &str = "           ('Study Mode', 'block', '[\"Gaming\",\"Entertainment\",\"Social Media\"]', '[]', '[]', 'confirm', 1),
@@ -461,6 +494,7 @@ fn sync_table_sql(table: &str, shared: bool) -> String {
                 "usage_limits" => "limit",
                 "goals" => "goal",
                 "block_profiles" => "profile",
+                "focus_runs" => "focus_run",
                 _ => "goal_check",
             };
             sql += &format!(
@@ -1059,7 +1093,7 @@ mod tests {
             // Turn a fresh database back into v8, with Work Mode edited by the user.
             let conn = open(&path).unwrap();
             conn.execute_batch(
-                "DROP TRIGGER block_profiles_sync_ins; DROP TRIGGER block_profiles_sync_upd;
+                "DROP TABLE focus_runs; DROP TRIGGER block_profiles_sync_ins; DROP TRIGGER block_profiles_sync_upd;
                  DROP TRIGGER block_profiles_sync_del; DROP TRIGGER applications_cat_upd;
                  DROP TRIGGER websites_cat_upd;
                  DROP INDEX idx_block_profiles_uuid; DROP INDEX idx_block_profiles_pending;

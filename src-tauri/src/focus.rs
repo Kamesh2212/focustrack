@@ -93,6 +93,21 @@ pub struct ActiveFocus {
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
     pub stop_requested: Option<NaiveDateTime>,
+    /// Shared with other devices (#71).
+    pub run: Option<RunLink>,
+}
+
+/// A session running on several devices (#71).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLink {
+    pub id: String,
+    /// Started on another device, which keeps it in the history.
+    pub joined: bool,
+    /// Name of the device that started it.
+    pub origin: String,
+    /// Device IDs taking part; "*" means all of them.
+    pub devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +134,7 @@ pub struct FocusStatus {
     /// Strict mode: seconds until ending is allowed (after a request).
     pub stop_wait_secs: Option<i64>,
     pub plan: FocusPlan,
+    pub run: Option<RunLink>,
 }
 
 /// What happens when a phase ends.
@@ -208,6 +224,7 @@ impl ActiveFocus {
             end_early,
             stop_wait_secs,
             plan: self.plan.clone(),
+            run: self.run.clone(),
         }
     }
 }
@@ -295,6 +312,8 @@ struct SavedFocus {
     session_id: i64,
     start: String,
     end: String,
+    #[serde(default)]
+    run: Option<RunLink>,
 }
 
 /// Saves (or clears) the running session.
@@ -308,6 +327,7 @@ fn persist(conn: &Connection, active: Option<&ActiveFocus>) -> rusqlite::Result<
                 session_id: a.session_id,
                 start: db::fmt_time(a.start),
                 end: db::fmt_time(a.end),
+                run: a.run.clone(),
             })
             .ok()
         })
@@ -352,6 +372,7 @@ pub fn resume(
         start,
         end,
         stop_requested: None,
+        run: s.run,
     };
     if at >= active.end {
         let seen: i64 = conn
@@ -376,6 +397,9 @@ pub fn resume(
         let (phase, round, mins, from) = loop {
             let (ph, r, mins) = match next_phase(&active.plan, phase, round) {
                 Next::Done => {
+                    if let Some(r) = &active.run {
+                        end_run(conn, &r.id, false)?;
+                    }
                     persist(conn, None)?;
                     return Ok(None);
                 }
@@ -397,6 +421,7 @@ pub fn resume(
             round,
             mins,
             from,
+            active.run,
         )?;
     }
     persist(conn, Some(&active))?;
@@ -489,6 +514,7 @@ fn begin(
     round: u32,
     mins: u32,
     at: NaiveDateTime,
+    run: Option<RunLink>,
 ) -> rusqlite::Result<ActiveFocus> {
     let secs = mins as i64 * 60;
     let mut a = ActiveFocus {
@@ -501,13 +527,236 @@ fn begin(
         start: at,
         end: at + Duration::seconds(secs),
         stop_requested: None,
+        run,
     };
-    a.session_id = insert_row(conn, &a.plan, phase, secs, at, a.blocking_now())?;
+    // A session joined from another device is in the history once, on that device.
+    if !a.run.as_ref().is_some_and(|r| r.joined) {
+        a.session_id = insert_row(conn, &a.plan, phase, secs, at, a.blocking_now())?;
+    }
     Ok(a)
 }
 
-/// Starts a new plan. Fails if a session is already running.
-pub fn start(conn: &Connection, shared: &Shared, plan: FocusPlan) -> Result<FocusStatus, String> {
+/// Shares a new session with other devices (#71).
+fn create_run(
+    conn: &Connection,
+    plan: &FocusPlan,
+    devices: &[String],
+) -> rusqlite::Result<RunLink> {
+    let id = focustrack_sync_proto::new_id();
+    let mut shared_plan = plan.clone();
+    shared_plan.profile_id = None;
+    shared_plan.goal_id = None;
+    let profile: Option<String> = match plan.profile_id {
+        Some(p) => conn
+            .query_row(
+                "SELECT uuid FROM block_profiles WHERE id = ?1",
+                params![p],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten(),
+        None => None,
+    };
+    let start = chrono::Utc::now().timestamp();
+    let total = plan.focus_mins as i64 * 60 + rest_of_plan_secs(plan, Phase::Focus, 1);
+    conn.execute(
+        "INSERT INTO focus_runs (uuid, plan, profile_uuid, start_utc, planned_end_utc, devices, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT value FROM user_settings WHERE key = 'device_id'))",
+        params![
+            id,
+            serde_json::to_string(&shared_plan).unwrap_or_default(),
+            profile,
+            start,
+            start + total,
+            serde_json::to_string(devices).unwrap_or_default()
+        ],
+    )?;
+    Ok(RunLink {
+        id,
+        joined: false,
+        origin: crate::sync::device_name(conn),
+        devices: devices.to_vec(),
+    })
+}
+
+/// Marks a shared session as over, for the other devices.
+fn end_run(conn: &Connection, id: &str, early: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE focus_runs SET ended_utc = ?2, ended_early = ?3 WHERE uuid = ?1 AND ended_utc IS NULL",
+        params![id, chrono::Utc::now().timestamp(), early],
+    )?;
+    Ok(())
+}
+
+fn mode_word(plan: &FocusPlan) -> &'static str {
+    if plan.mode == "study" {
+        "Study"
+    } else {
+        "Focus"
+    }
+}
+
+/// Follows sessions shared by other devices (#71): joins one that includes
+/// this device, and ends ours when another device ended it early. Returns the
+/// notification to show.
+pub fn follow_runs(
+    conn: &Connection,
+    shared: &Shared,
+    at: NaiveDateTime,
+) -> rusqlite::Result<Option<(String, String)>> {
+    let current = shared.focus.lock().ok().and_then(|f| f.clone());
+    if let Some(a) = current {
+        let Some(run) = a.run.as_ref() else {
+            return Ok(None);
+        };
+        let state: Option<(Option<i64>, bool)> = conn
+            .query_row(
+                "SELECT ended_utc, ended_early FROM focus_runs WHERE uuid = ?1",
+                params![run.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // Finished on schedule elsewhere: this device's timer ends it too.
+        if !matches!(state, Some((Some(_), true))) {
+            return Ok(None);
+        }
+        let Ok(mut f) = shared.focus.lock() else {
+            return Ok(None);
+        };
+        if f.as_ref().and_then(|x| x.run.as_ref()).map(|r| &r.id) != Some(&run.id) {
+            return Ok(None);
+        }
+        if !run.joined {
+            close_row(conn, a.session_id, a.start, at.min(a.end), false)?;
+        }
+        *f = None;
+        drop(f);
+        persist(conn, None)?;
+        apply_blocks(shared, None);
+        return Ok(Some((
+            format!("{} session ended", mode_word(&a.plan)),
+            format!("\"{}\" was ended on another device.", a.plan.label),
+        )));
+    }
+
+    let me = db::get_setting(conn, "device_id")?.unwrap_or_default();
+    let rows: Vec<(String, String, Option<String>, i64, String, String)> = conn
+        .prepare(
+            "SELECT r.uuid, r.plan, r.profile_uuid, r.start_utc, r.devices, COALESCE(NULLIF(d.name, ''), 'another device')
+             FROM focus_runs r LEFT JOIN devices d ON d.id = r.origin
+             WHERE r.ended_utc IS NULL AND r.planned_end_utc > unixepoch() AND r.origin IS NOT ?1
+             ORDER BY r.start_utc DESC",
+        )?
+        .query_map(params![me], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    for (id, plan, profile_uuid, start_utc, devices, origin) in rows {
+        let devices: Vec<String> = serde_json::from_str(&devices).unwrap_or_default();
+        if !devices.iter().any(|d| d == "*" || *d == me) {
+            continue;
+        }
+        let Ok(mut plan) = serde_json::from_str::<FocusPlan>(&plan) else {
+            continue;
+        };
+        let Some(start) = chrono::DateTime::from_timestamp(start_utc, 0) else {
+            continue;
+        };
+        if plan.validate().is_err() {
+            continue;
+        }
+        // Where the schedule is now.
+        let (mut phase, mut round, mut mins, mut from) = (
+            Phase::Focus,
+            1,
+            plan.focus_mins,
+            start.with_timezone(&Local).naive_local(),
+        );
+        let mut done = false;
+        while at >= from + Duration::minutes(mins as i64) {
+            from += Duration::minutes(mins as i64);
+            match next_phase(&plan, phase, round) {
+                Next::Done => {
+                    done = true;
+                    break;
+                }
+                Next::Break { round: r, mins: m } => (phase, round, mins) = (Phase::Break, r, m),
+                Next::Focus { round: r } => {
+                    (phase, round, mins) = (Phase::Focus, r, plan.focus_mins)
+                }
+            }
+        }
+        if done {
+            continue;
+        }
+        let profile_id: Option<i64> = match &profile_uuid {
+            Some(u) => conn
+                .query_row(
+                    "SELECT id FROM block_profiles WHERE uuid = ?1",
+                    params![u],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        plan.profile_id = profile_id;
+        let (profile, prev) = match profile_id.map(|p| preview(conn, p)) {
+            Some(Ok((p, v))) => (Some(p), Some(v)),
+            _ => (None, None),
+        };
+        let active = ActiveFocus {
+            plan,
+            profile,
+            preview: prev,
+            phase,
+            round,
+            session_id: 0,
+            start: from,
+            end: from + Duration::minutes(mins as i64),
+            stop_requested: None,
+            run: Some(RunLink {
+                id,
+                joined: true,
+                origin: origin.clone(),
+                devices,
+            }),
+        };
+        let Ok(mut f) = shared.focus.lock() else {
+            return Ok(None);
+        };
+        if f.is_some() {
+            return Ok(None); // started here in the meantime
+        }
+        *f = Some(active.clone());
+        drop(f);
+        persist(conn, Some(&active))?;
+        apply_blocks(shared, Some(&active));
+        let until = active.status(at).plan_ends_at;
+        return Ok(Some((
+            format!("{} session from {origin}", mode_word(&active.plan)),
+            format!(
+                "\"{}\" is running here too, until {}.{}",
+                active.plan.label,
+                until.get(11..16).unwrap_or(""),
+                if active.preview.is_some() {
+                    " Its blocking applies on this device."
+                } else {
+                    ""
+                }
+            ),
+        )));
+    }
+    Ok(None)
+}
+
+/// Starts a new plan, on this device and the `devices` given (IDs, or "*"
+/// for all; #71). Fails if a session is already running.
+pub fn start(
+    conn: &Connection,
+    shared: &Shared,
+    plan: FocusPlan,
+    devices: Vec<String>,
+) -> Result<FocusStatus, String> {
     plan.validate()?;
     if shared.focus.lock().map(|f| f.is_some()).unwrap_or(false) {
         return Err("A session is already running. End it first.".into());
@@ -521,8 +770,13 @@ pub fn start(conn: &Connection, shared: &Shared, plan: FocusPlan) -> Result<Focu
     };
     let at = now();
     let mins = plan.focus_mins;
-    let active =
-        begin(conn, plan, profile, prev, Phase::Focus, 1, mins, at).map_err(|e| e.to_string())?;
+    let run = if devices.is_empty() {
+        None
+    } else {
+        Some(create_run(conn, &plan, &devices).map_err(|e| e.to_string())?)
+    };
+    let active = begin(conn, plan, profile, prev, Phase::Focus, 1, mins, at, run)
+        .map_err(|e| e.to_string())?;
     let status = active.status(at);
     persist(conn, Some(&active)).map_err(|e| e.to_string())?;
     apply_blocks(shared, Some(&active));
@@ -568,6 +822,9 @@ pub fn stop(conn: &Connection, shared: &Shared, phrase: Option<&str>) -> Result<
     if let Some(a) = f.as_ref() {
         can_stop(a, phrase, at)?;
         close_row(conn, a.session_id, a.start, at.min(a.end), false).map_err(|e| e.to_string())?;
+        if let Some(r) = &a.run {
+            end_run(conn, &r.id, true).map_err(|e| e.to_string())?;
+        }
     }
     *f = None;
     drop(f);
@@ -612,6 +869,9 @@ pub fn tick(
 
     let a = guard.take().expect("checked above");
     close_row(conn, a.session_id, a.start, a.end, true)?;
+    if let (Next::Done, Some(r)) = (next_phase(&a.plan, a.phase, a.round), &a.run) {
+        end_run(conn, &r.id, false)?;
+    }
     let rounds = a.plan.rounds;
     let note = match next_phase(&a.plan, a.phase, a.round) {
         Next::Done => {
@@ -658,6 +918,7 @@ pub fn tick(
                 round,
                 mins,
                 a.end,
+                a.run.clone(),
             )?);
             (
                 format!("Round {round} of {rounds} done"),
@@ -675,6 +936,7 @@ pub fn tick(
                 round,
                 mins,
                 a.end,
+                a.run.clone(),
             )?);
             (
                 "Back to focus".to_string(),
@@ -822,6 +1084,22 @@ pub fn spawn(app: tauri::AppHandle, db_path: PathBuf, shared: Arc<Shared>) {
                         let _ = w.set_focus();
                     }
                 }
+                if ticks.is_multiple_of(3) {
+                    match follow_runs(&conn, &shared, now()) {
+                        Ok(Some((title, body))) => {
+                            if status(&shared).is_some() {
+                                crate::popup::open(&app);
+                            } else {
+                                crate::popup::close(&app);
+                            }
+                            if shared.notifications_enabled.load(Ordering::SeqCst) {
+                                notify(&app, &title, &body);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[focus] following shared sessions failed: {e}"),
+                    }
+                }
                 match tick(&conn, &shared, now(), ticks.is_multiple_of(15)) {
                     Ok(Some((title, body))) => {
                         if status(&shared).is_none() {
@@ -881,7 +1159,7 @@ mod tests {
             profile_id: Some(profile_id(&conn, "Study Mode")),
             ..plan(1, 0, 0)
         };
-        start(&conn, &shared, p).unwrap();
+        start(&conn, &shared, p, vec![]).unwrap();
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
 
         let shared = restart();
@@ -912,7 +1190,7 @@ mod tests {
     fn stopping_clears_the_saved_session() {
         let conn = db::open_in_memory().unwrap();
         let shared = Shared::new(false, 300);
-        start(&conn, &shared, plan(1, 0, 0)).unwrap();
+        start(&conn, &shared, plan(1, 0, 0), vec![]).unwrap();
         stop(&conn, &shared, None).unwrap();
         assert!(resume(&conn, &restart(), now()).unwrap().is_none());
     }
@@ -922,7 +1200,7 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let shared = Shared::new(false, 300);
         // 25 min focus, 5 min break, 2 rounds.
-        start(&conn, &shared, plan(2, 5, 0)).unwrap();
+        start(&conn, &shared, plan(2, 5, 0), vec![]).unwrap();
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
         tick(&conn, &shared, t0 + Duration::minutes(10), true).unwrap();
 
@@ -955,7 +1233,7 @@ mod tests {
     fn plan_that_ended_while_off_is_not_resumed() {
         let conn = db::open_in_memory().unwrap();
         let shared = Shared::new(false, 300);
-        start(&conn, &shared, plan(1, 0, 0)).unwrap();
+        start(&conn, &shared, plan(1, 0, 0), vec![]).unwrap();
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;
         let shared = restart();
         assert!(resume(&conn, &shared, t0 + Duration::hours(3))
@@ -1042,9 +1320,12 @@ mod tests {
             ..plan(2, 1, 0)
         };
 
-        let st = start(&conn, &shared, p.clone()).unwrap();
+        let st = start(&conn, &shared, p.clone(), vec![]).unwrap();
         assert!(st.blocking);
-        assert!(start(&conn, &shared, p).is_err(), "one session at a time");
+        assert!(
+            start(&conn, &shared, p, vec![]).is_err(),
+            "one session at a time"
+        );
         assert!(shared
             .focus_blocklist
             .lock()
@@ -1102,6 +1383,7 @@ mod tests {
                 profile_id: Some(profile_id(&conn, "Study Mode")),
                 ..plan(1, 0, 0)
             },
+            vec![],
         )
         .unwrap();
         assert!(stop(&conn, &shared, None).is_err());
@@ -1117,6 +1399,7 @@ mod tests {
                 profile_id: Some(profile_id(&conn, "Deep Focus")),
                 ..plan(1, 0, 0)
             },
+            vec![],
         )
         .unwrap();
         assert!(shared.app_blocks.lock().unwrap().allow_only.is_some());
@@ -1160,6 +1443,7 @@ mod tests {
                 focus_mins: 1,
                 ..plan(1, 0, 0)
             },
+            vec![],
         )
         .unwrap();
         let t0 = shared.focus.lock().unwrap().as_ref().unwrap().start;

@@ -22,6 +22,11 @@ All notable changes to this project are documented here. The format follows
 - **Blocking profiles and categories sync** (#62): profiles you create, edit or delete, and the category you
   pick for an app or website, now sync to all your devices. If two devices edit the same profile while
   offline, the later edit wins; two new profiles with the same name are both kept. Database schema v9.
+- **Focus sessions across devices** (#71): when starting a focus or study session, choose to run it on this
+  device, all your devices, or ones you pick. The other devices join at their next sync (devices sync every
+  15 seconds while such a session runs), show the same timer and apply the same blocking profile. Ending it on
+  any device, following the profile's rules, ends it everywhere. The session is recorded once, on the device
+  that started it. Database schema v10.
 
 ## [1.2.0] - 2026-11-19
 

@@ -263,6 +263,18 @@ export interface FocusStatus {
   endEarly: EndEarly;
   stopWaitSecs: number | null;
   plan: FocusPlan;
+  /** Running on several devices. */
+  run: FocusRun | null;
+}
+
+export interface FocusRun {
+  id: string;
+  /** Started on another device (which keeps it in the history). */
+  joined: boolean;
+  /** Name of the device that started it. */
+  origin: string;
+  /** Device IDs taking part; "*" = all. */
+  devices: string[];
 }
 
 export interface FocusRecord {

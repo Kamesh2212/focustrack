@@ -941,11 +941,19 @@ pub async fn start_focus(
     app: AppHandle,
     state: State<'_, AppState>,
     plan: crate::focus::FocusPlan,
+    devices: Option<Vec<String>>,
 ) -> CmdResult<crate::focus::FocusStatus> {
+    let devices = devices.unwrap_or_default();
+    if devices.len() > 50 || devices.iter().any(|d| d.len() > 64) {
+        return Err("Too many devices".into());
+    }
     let status = {
         let conn = conn!(state);
-        crate::focus::start(&conn, &state.shared, plan)?
+        crate::focus::start(&conn, &state.shared, plan, devices)?
     };
+    if status.run.is_some() {
+        state.sync.wake();
+    }
     crate::popup::open(&app);
     if state.shared.notifications_enabled.load(Ordering::SeqCst) {
         let what = if status.mode == "study" {
@@ -1000,6 +1008,7 @@ pub fn stop_focus(
     let conn = conn!(state);
     crate::focus::stop(&conn, &state.shared, phrase.as_deref())?;
     crate::popup::close(&app);
+    state.sync.wake();
     Ok(())
 }
 

@@ -28,6 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// While a focus session runs on several devices, so ending it reaches the others quickly (#71).
+const FOCUS_RUN_SYNC_EVERY: Duration = Duration::from_secs(15);
 const BATCH: usize = 500;
 /// Detailed history a new device downloads (design D7).
 const FIRST_SYNC_DAYS: u32 = 35;
@@ -683,6 +685,38 @@ fn collect_pending(
         );
     }
 
+    // Focus sessions shared between devices (#71).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, plan, profile_uuid, start_utc, planned_end_utc, devices, origin, ended_utc, ended_early
+         FROM focus_runs WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        let parse = |t: String| serde_json::from_str::<Value>(&t).unwrap_or(Value::Null);
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "plan": parse(s(r, 3)?), "profile": r.get::<_, Option<String>>(4)?,
+                    "start": r.get::<_, i64>(5)?, "plannedEnd": r.get::<_, i64>(6)?,
+                    "devices": parse(s(r, 7)?), "origin": s(r, 8)?, "ended": r.get::<_, Option<i64>>(9)?,
+                    "endedEarly": r.get::<_, i64>(10)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::FOCUS_RUN,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("focus_runs"),
+        );
+    }
+
     // Categories the user picked for apps and websites (#62).
     let mut stmt = conn.prepare(
         "SELECT a.app_key, a.cat_version, a.cat_hlc, a.exe_name, COALESCE(a.exe_path, ''), a.display_name, c.name
@@ -752,6 +786,7 @@ fn collect_pending(
             "limit" => kind::LIMIT,
             "goal" => kind::GOAL,
             "profile" => kind::PROFILE,
+            "focus_run" => kind::FOCUS_RUN,
             _ => kind::GOAL_CHECK,
         };
         seal(
@@ -873,6 +908,7 @@ fn table_for(k: &str) -> Option<&'static str> {
         kind::GOAL => "goals",
         kind::GOAL_CHECK => "goal_checks",
         kind::PROFILE => "block_profiles",
+        kind::FOCUS_RUN => "focus_runs",
         _ => return None,
     })
 }
@@ -1156,6 +1192,30 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                 params![goal, str_of(b, "day"), env.id, dev, v, env.hlc],
             )?;
         }
+        kind::FOCUS_RUN => {
+            let plan = b.get("plan").cloned().unwrap_or(Value::Null);
+            if serde_json::from_value::<crate::focus::FocusPlan>(plan.clone()).is_err() {
+                return Ok(false);
+            }
+            let devices = b
+                .get("devices")
+                .filter(|v| v.is_array())
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            conn.execute(
+                "INSERT INTO focus_runs (plan, profile_uuid, start_utc, planned_end_utc, devices, origin, ended_utc,
+                     ended_early, uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
+                 ON CONFLICT(uuid) DO UPDATE SET plan = excluded.plan, profile_uuid = excluded.profile_uuid,
+                     start_utc = excluded.start_utc, planned_end_utc = excluded.planned_end_utc,
+                     devices = excluded.devices, origin = excluded.origin, ended_utc = excluded.ended_utc,
+                     ended_early = excluded.ended_early, device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc",
+                params![plan.to_string(), opt_str(b, "profile"), int_of(b, "start"), int_of(b, "plannedEnd"),
+                        devices.to_string(), str_of(b, "origin"), b.get("ended").and_then(Value::as_i64),
+                        bool_of(b, "endedEarly"), env.id, dev, v, env.hlc],
+            )?;
+        }
         kind::PROFILE => {
             let mode = str_of(b, "mode");
             let base = str_of(b, "name").trim();
@@ -1205,6 +1265,16 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// A focus session shared with other devices is running (#71).
+fn focus_run_active(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM focus_runs WHERE ended_utc IS NULL AND planned_end_utc > unixepoch())",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Another device changed the category of an app or website (#62).
@@ -1429,7 +1499,12 @@ pub fn spawn(handle: Arc<SyncHandle>, db_path: PathBuf, shared: Arc<crate::track
                     break;
                 }
                 let woken = handle.wake.swap(false, Ordering::SeqCst);
-                let due = last.elapsed() >= SYNC_EVERY.max(backoff);
+                let every = if focus_run_active(&conn) {
+                    FOCUS_RUN_SYNC_EVERY
+                } else {
+                    SYNC_EVERY
+                };
+                let due = last.elapsed() >= every.max(backoff);
                 let enabled = setting(&conn, "sync_enabled").as_deref() == Some("1");
                 if enabled && handle.signed_in() && (woken || due) {
                     handle.set(|s| s.state = "syncing".into());
@@ -2782,6 +2857,122 @@ mod tests {
         }
         assert_eq!(profile_sites(&a, "Exams (2)"), r#"["b.com"]"#);
         assert_eq!(profile_sites(&b, "Exams (2)"), r#"["a.com"]"#);
+    }
+
+    fn focus_plan() -> crate::focus::FocusPlan {
+        crate::focus::FocusPlan {
+            label: "Revision".into(),
+            focus_mins: 50,
+            break_mins: 10,
+            long_break_mins: 0,
+            rounds: 2,
+            profile_id: None,
+            mode: "focus".into(),
+            subject: None,
+            goal_text: None,
+            goal_id: None,
+        }
+    }
+
+    #[test]
+    fn a_focus_session_runs_on_both_devices_and_ends_on_both() {
+        use crate::focus;
+        let (mut a, mut b) = pair();
+        let (sa, sb) = (
+            crate::tracker::Shared::new(false, 300),
+            crate::tracker::Shared::new(false, 300),
+        );
+        let study: i64 = a
+            .conn
+            .query_row(
+                "SELECT id FROM block_profiles WHERE name = 'Study Mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let st = focus::start(
+            &a.conn,
+            &sa,
+            focus::FocusPlan {
+                profile_id: Some(study),
+                ..focus_plan()
+            },
+            vec!["*".into()],
+        )
+        .unwrap();
+        assert!(st.run.as_ref().is_some_and(|r| !r.joined));
+        assert!(focus_run_active(&a.conn));
+        a.sync();
+        b.sync();
+
+        // B joins: same session, same profile, blocking on; no second history row.
+        let (title, _) = focus::follow_runs(&b.conn, &sb, now())
+            .unwrap()
+            .expect("joined");
+        assert!(title.contains("Laptop"), "{title}");
+        let fb = focus::status(&sb).unwrap();
+        assert_eq!((fb.label.as_str(), fb.round, fb.rounds), ("Revision", 1, 2));
+        assert_eq!(fb.profile_name.as_deref(), Some("Study Mode"));
+        assert!(fb.blocking);
+        assert!(fb.run.as_ref().is_some_and(|r| r.joined));
+        assert_eq!(fb.plan_ends_at, st.plan_ends_at);
+        assert_eq!(
+            b.count(&format!(
+                "SELECT COUNT(*) FROM focus_sessions WHERE device_id = {}",
+                db::OWN_DEVICE
+            )),
+            0
+        );
+        assert!(
+            focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none(),
+            "joins once"
+        );
+
+        // B ends it early (Study Mode asks for the phrase); A's session ends too.
+        assert!(
+            focus::stop(&b.conn, &sb, None).is_err(),
+            "the profile's rules apply"
+        );
+        focus::stop(&b.conn, &sb, Some(focus::STOP_PHRASE)).unwrap();
+        assert!(
+            focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none(),
+            "no rejoining"
+        );
+        b.sync();
+        a.sync();
+        let (_, body) = focus::follow_runs(&a.conn, &sa, now())
+            .unwrap()
+            .expect("ended");
+        assert!(body.contains("ended on another device"), "{body}");
+        assert!(focus::status(&sa).is_none());
+        assert_eq!(
+            a.count(
+                "SELECT COUNT(*) FROM focus_sessions WHERE end_time IS NOT NULL AND completed = 0"
+            ),
+            1,
+            "recorded once, as ended early"
+        );
+        assert!(!focus_run_active(&a.conn));
+    }
+
+    #[test]
+    fn a_focus_session_for_other_devices_leaves_this_one_alone() {
+        use crate::focus;
+        let (mut a, mut b) = pair();
+        let sb = crate::tracker::Shared::new(false, 300);
+        let sa = crate::tracker::Shared::new(false, 300);
+        focus::start(&a.conn, &sa, focus_plan(), vec!["some-other-device".into()]).unwrap();
+        a.sync();
+        b.sync();
+        assert!(focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none());
+        // B is busy with its own session: a run for it waits.
+        focus::stop(&a.conn, &sa, None).unwrap();
+        focus::start(&b.conn, &sb, focus_plan(), vec![]).unwrap();
+        focus::start(&a.conn, &sa, focus_plan(), vec![b.id()]).unwrap();
+        a.sync();
+        b.sync();
+        assert!(focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none());
+        assert!(focus::status(&sb).unwrap().run.is_none());
     }
 
     #[test]
