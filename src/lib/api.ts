@@ -79,6 +79,7 @@ export const api = {
   setDashboardLayout: (layout: string) => call<void>("set_dashboard_layout", { layout }),
   deleteLimit: (id: number) => call<void>("delete_limit", { id }),
   setNotificationsEnabled: (enabled: boolean) => call<void>("set_notifications_enabled", { enabled }),
+  setShowQuotes: (enabled: boolean) => call<void>("set_show_quotes", { enabled }),
   setBreakReminder: (mins: number) => call<void>("set_break_reminder", { mins }),
   setWebsiteTracking: (enabled: boolean) => call<void>("set_website_tracking", { enabled }),
   testNotification: () => call<void>("send_test_notification"),

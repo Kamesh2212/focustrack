@@ -40,6 +40,10 @@ All notable changes to this project are documented here. The format follows
 - **Compare devices** (#65): Reports shows your devices side by side: total, daily average, weekdays vs
   weekends, productive vs distracting time and what each is mostly used for, plus computers vs phones and
   the most-used device. Select one for its full report.
+- **Motivational quotes** (#49, #50): the blocked-website page shows a short quote from history about focus,
+  hard work, patience or not giving up, and blocked-app notifications add one when it fits. Never the same one
+  twice in a row; turn them off under Settings → Show motivational quotes. The first 25 quotes, each with a
+  checked source, are in `quotes/quotes.json` (built into the app; the extension gets its quote from the app).
 
 ## [1.2.0] - 2026-11-19
 

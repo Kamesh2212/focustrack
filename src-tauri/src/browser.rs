@@ -303,6 +303,20 @@ fn handle(mut req: Request, shared: &Shared, conn: Option<&rusqlite::Connection>
             shared.show_requested.store(true, Ordering::SeqCst);
             let _ = req.respond(json_response(&cors, 200, r#"{"ok":true}"#.into()));
         }
+        // A motivational quote for the blocked page (#49); null when turned off.
+        (Method::Get, "/v1/quote") => {
+            if header(&req, "X-FocusTrack").is_none() {
+                let _ = req.respond(json_response(
+                    &cors,
+                    403,
+                    r#"{"error":"missing header"}"#.into(),
+                ));
+                return;
+            }
+            let body =
+                serde_json::to_string(&crate::quotes::pick(240)).unwrap_or_else(|_| "null".into());
+            let _ = req.respond(json_response(&cors, 200, body));
+        }
         (Method::Post, "/v1/goals/toggle") | (Method::Post, "/v1/notes") => {
             if header(&req, "X-FocusTrack").is_none() {
                 let _ = req.respond(json_response(
@@ -553,6 +567,19 @@ mod tests {
         assert!(get("Origin: null\r\n", "").starts_with("HTTP/1.1 403"));
         let rebinding = send("GET /v1/summary HTTP/1.1\r\nHost: evil.example:17865\r\nX-FocusTrack: 1\r\nConnection: close\r\n\r\n");
         assert!(rebinding.starts_with("HTTP/1.1 403"));
+
+        // The blocked page's quote (#49): extension only, with text and author.
+        let quote = |extra: &str| {
+            send(&format!(
+                "GET /v1/quote HTTP/1.1\r\n{host}\r\nOrigin: chrome-extension://abc\r\n{extra}Connection: close\r\n\r\n"
+            ))
+        };
+        let q = quote("X-FocusTrack: 1\r\n");
+        assert!(
+            q.starts_with("HTTP/1.1 200") && q.contains("\"author\""),
+            "{q}"
+        );
+        assert!(quote("").starts_with("HTTP/1.1 403"));
     }
 
     #[test]

@@ -205,6 +205,8 @@ export interface Settings {
   theme: Theme;
   dataDir: string;
   notificationsEnabled: boolean;
+  /** A motivational quote when something is blocked. */
+  showQuotes: boolean;
   breakReminderMins: number;
   websiteTracking: boolean;
   overridesPerDay: number;

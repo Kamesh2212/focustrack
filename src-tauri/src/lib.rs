@@ -27,6 +27,7 @@ mod platform;
 mod popup;
 mod profile;
 mod profiles;
+mod quotes;
 mod sync;
 mod tracker;
 
@@ -167,6 +168,7 @@ pub fn run() {
             shared
                 .notifications_enabled
                 .store(settings.notifications_enabled, Ordering::SeqCst);
+            quotes::set_enabled(db::get_setting(&conn, "show_quotes")?.as_deref() != Some("0"));
             shared
                 .break_reminder_mins
                 .store(settings.break_reminder_mins, Ordering::SeqCst);
@@ -232,6 +234,7 @@ pub fn run() {
             commands::delete_all_data,
             commands::delete_data_older_than,
             commands::set_notifications_enabled,
+            commands::set_show_quotes,
             commands::set_break_reminder,
             commands::set_website_tracking,
             commands::send_test_notification,

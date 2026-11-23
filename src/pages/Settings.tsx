@@ -147,6 +147,12 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
           >
             <Toggle label="Notifications" checked={s.notificationsEnabled} onChange={(on) => run(() => api.setNotificationsEnabled(on))} />
           </Row>
+          <Row
+            title="Show motivational quotes"
+            desc="A short quote from history about focus, hard work or not giving up, on the blocked-website page and with blocked-app notifications."
+          >
+            <Toggle label="Show motivational quotes" checked={s.showQuotes} onChange={(on) => run(() => api.setShowQuotes(on))} />
+          </Row>
           {!phone && (
           <Row title="Break reminder" desc="Remind me after this much continuous computer use. A 5-minute break resets it.">
             <select

@@ -275,7 +275,12 @@ pub fn spawn(app: tauri::AppHandle, shared: Arc<Shared>) {
                                 .get(&lower)
                                 .is_none_or(|t| t.elapsed() >= NOTIFY_EVERY);
                             if due {
-                                let (title, body) = message(&reason, blocks.focus_label.as_deref());
+                                let (title, mut body) = message(&reason, blocks.focus_label.as_deref());
+                                // A short motivational quote, when one fits (#49).
+                                if let Some(q) = crate::quotes::for_notification() {
+                                    body = format!("{body}
+{q}");
+                                }
                                 notify(&app, &title, &body);
                                 notified.insert(lower, Instant::now());
                             }

@@ -201,6 +201,7 @@ const settings: Settings = {
   goalReminder: "20:00",
   dashboardLayout: "",
   notificationsEnabled: true,
+  showQuotes: true,
   breakReminderMins: 120,
   websiteTracking: true,
   dataDir: "C:\\Users\\you\\AppData\\Roaming\\com.focustrack.app",
@@ -488,6 +489,9 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "set_notifications_enabled":
         settings.notificationsEnabled = a.enabled;
+        return null;
+      case "set_show_quotes":
+        settings.showQuotes = a.enabled;
         return null;
       case "set_break_reminder":
         settings.breakReminderMins = a.mins;

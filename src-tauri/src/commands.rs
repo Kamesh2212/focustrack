@@ -502,6 +502,8 @@ pub struct Settings {
     pub theme: String,
     pub data_dir: String,
     pub notifications_enabled: bool,
+    /// A motivational quote when something is blocked (#49).
+    pub show_quotes: bool,
     pub break_reminder_mins: u64,
     pub website_tracking: bool,
     pub overrides_per_day: i64,
@@ -521,6 +523,7 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Set
         theme: s.theme,
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         notifications_enabled: s.notifications_enabled,
+        show_quotes: crate::quotes::enabled(),
         break_reminder_mins: s.break_reminder_mins,
         website_tracking: s.website_tracking,
         overrides_per_day: s.overrides_per_day,
@@ -660,6 +663,13 @@ pub fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) -> C
         if enabled { "1" } else { "0" },
     )
     .map_err(err)
+}
+
+#[tauri::command]
+pub fn set_show_quotes(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    crate::quotes::set_enabled(enabled);
+    let conn = conn!(state);
+    db::set_setting(&conn, "show_quotes", if enabled { "1" } else { "0" }).map_err(err)
 }
 
 #[tauri::command]
