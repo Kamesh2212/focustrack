@@ -136,6 +136,7 @@ let nextNoteId = 4;
 
 let phoneAccess = false;
 let retention: number | null = null;
+const mockPaused: Record<string, boolean> = {};
 
 const sync: SyncStatus = {
   signedIn: false,
@@ -589,9 +590,13 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "sync_devices":
         return [
-          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), current: true },
-          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), current: false },
+          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), online: true, lastActivity: null, paused: false, syncError: null, syncDisabled: false, current: true },
+          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), online: false, lastActivity: "2026-11-23 09:41:00", paused: mockPaused.d2 ?? false, syncError: null, syncDisabled: false, current: false },
+          { id: "d3", name: "Pixel 8", platform: "android", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 60_000).toISOString(), online: true, lastActivity: "2026-11-23 10:12:00", paused: mockPaused.d3 ?? false, syncError: "can't reach the sync server: timed out", syncDisabled: false, current: false },
         ];
+      case "sync_device_control":
+        if (a.pauseTracking !== null) mockPaused[String(a.id)] = Boolean(a.pauseTracking);
+        return null;
       case "sync_remove_device":
         sync.otherDevices = 0;
         return null;

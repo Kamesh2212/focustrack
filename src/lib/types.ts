@@ -195,7 +195,14 @@ export interface SyncDevice {
   name: string;
   platform: string;
   appVersion: string;
+  /** Last time it talked to the server (≈ last sync). */
   lastSeen: string | null;
+  online: boolean;
+  lastActivity: string | null;
+  paused: boolean;
+  syncError: string | null;
+  /** Sync was turned off for it from another device. */
+  syncDisabled: boolean;
   current: boolean;
 }
 

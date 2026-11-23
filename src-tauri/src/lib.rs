@@ -288,6 +288,7 @@ pub fn run() {
             commands::sync_retention,
             commands::sync_set_retention,
             commands::sync_export,
+            commands::sync_device_control,
             commands::get_insets,
             commands::phone_usage_access,
             commands::open_usage_access,

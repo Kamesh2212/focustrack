@@ -384,12 +384,14 @@ fn collect_pending(
         });
     };
 
-    // The device record (its name), whenever it changed.
+    // The device record (name and status), whenever it changed.
     let name = device_name(conn);
     let dev_version: i64 = setting(conn, "device_record_version")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if setting(conn, "device_record_synced").as_deref() != Some(&format!("{dev_version}:{name}")) {
+    if setting(conn, "device_record_synced").as_deref()
+        != Some(&format!("{dev_version}:{}", device_signature(conn)))
+    {
         seal(
             &mut out,
             me.clone(),
@@ -398,8 +400,43 @@ fn collect_pending(
             dev_version + 1,
             None,
             false,
-            json!({ "name": name, "platform": PLATFORM, "appVersion": env!("CARGO_PKG_VERSION") }),
+            json!({
+                "name": name,
+                "platform": PLATFORM,
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "paused": setting(conn, "paused").as_deref() == Some("1"),
+                "syncError": setting(conn, "sync_error"),
+            }),
             Source::Device,
+        );
+    }
+
+    // Remote controls for devices (#66).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, target, pause_tracking, sync_enabled FROM device_controls
+         WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "target": s(r, 3)?, "pauseTracking": r.get::<_, i64>(4)? != 0,
+                    "syncEnabled": r.get::<_, i64>(5)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::DEVICE_CONTROL,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("device_controls"),
         );
     }
 
@@ -668,7 +705,7 @@ fn mark_synced(
                 db::set_setting(
                     conn,
                     "device_record_synced",
-                    &format!("{v}:{}", device_name(conn)),
+                    &format!("{v}:{}", device_signature(conn)),
                 )?;
             }
         }
@@ -815,12 +852,25 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
     }
     if env.kind == kind::DEVICE {
         conn.execute(
-            "INSERT INTO devices (id, name, platform, app_version, last_seen) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO devices (id, name, platform, app_version, last_seen, paused, sync_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform,
-                 app_version = excluded.app_version, last_seen = excluded.last_seen",
-            params![env.device, str_of(b, "name"), str_of(b, "platform"), str_of(b, "appVersion"), db::fmt_time(now())],
+                 app_version = excluded.app_version, last_seen = excluded.last_seen,
+                 paused = excluded.paused, sync_error = excluded.sync_error",
+            params![
+                env.device,
+                str_of(b, "name"),
+                str_of(b, "platform"),
+                str_of(b, "appVersion"),
+                db::fmt_time(now()),
+                bool_of(b, "paused"),
+                opt_str(b, "syncError")
+            ],
         )?;
         return Ok(true);
+    }
+    if env.kind == kind::DEVICE_CONTROL {
+        return apply_control(conn, env, b);
     }
     let Some(t) = table_for(&env.kind) else {
         return Ok(false); // a newer app's record kind: ignore
@@ -1181,6 +1231,22 @@ pub fn spawn(handle: Arc<SyncHandle>, db_path: PathBuf, shared: Arc<crate::track
                     handle.set(|s| s.state = "syncing".into());
                     let result = sync_once(&handle, &mut conn);
                     last = Instant::now();
+                    // A remote control may have paused or resumed tracking here.
+                    let paused = setting(&conn, "paused").as_deref() == Some("1");
+                    if shared.paused.swap(paused, Ordering::SeqCst) != paused {
+                        eprintln!(
+                            "[sync] tracking {} by another device",
+                            if paused { "paused" } else { "resumed" }
+                        );
+                    }
+                    let _ = db::set_setting(
+                        &conn,
+                        "sync_error",
+                        &match &result {
+                            Ok(()) | Err(SyncError::Revoked) => String::new(),
+                            Err(e) => e.to_string().chars().take(160).collect(),
+                        },
+                    );
                     match result {
                         Ok(()) => {
                             backoff = Duration::ZERO;
@@ -1428,7 +1494,106 @@ pub fn sign_out(handle: &SyncHandle, conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Devices on the account, with names from their device records.
+/// What this device publishes about itself; the device record is re-sent when it changes.
+fn device_signature(conn: &Connection) -> String {
+    format!(
+        "{}|{}|{}",
+        device_name(conn),
+        setting(conn, "paused").as_deref() == Some("1"),
+        setting(conn, "sync_error").unwrap_or_default()
+    )
+}
+
+/// A remote control from another device (or this one). Applies it here when
+/// it targets this device: pause tracking, or turn sync off (#66).
+fn apply_control(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    let target = str_of(b, "target").to_string();
+    if target.is_empty() {
+        return Ok(false);
+    }
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT hlc FROM device_controls WHERE target = ?1",
+            params![target],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if local
+        .as_deref()
+        .is_some_and(|h| !hlc::newer(env.hlc.as_deref().unwrap_or(""), h))
+    {
+        return Ok(false);
+    }
+    let (pause, sync) = (
+        bool_of(b, "pauseTracking"),
+        b.get("syncEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
+    conn.execute(
+        "INSERT INTO device_controls (target, uuid, pause_tracking, sync_enabled, hlc, version, synced_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(target) DO UPDATE SET uuid = excluded.uuid, pause_tracking = excluded.pause_tracking,
+             sync_enabled = excluded.sync_enabled, hlc = excluded.hlc, version = excluded.version,
+             synced_version = excluded.synced_version",
+        params![target, env.id, pause, sync, env.hlc, env.version],
+    )?;
+    if target == device_id(conn)? {
+        db::set_setting(conn, "paused", if pause { "1" } else { "0" })?;
+        if !sync {
+            db::set_setting(conn, "sync_enabled", "0")?;
+        }
+    }
+    Ok(true)
+}
+
+/// Pauses tracking or turns sync off on a device (this one or another). Another
+/// device applies it at its next sync. Sync turned off remotely can only be
+/// turned back on from that device.
+pub fn set_device_control(
+    handle: &SyncHandle,
+    conn: &Connection,
+    target: &str,
+    pause_tracking: Option<bool>,
+    sync_enabled: Option<bool>,
+) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let me = device_id(conn).map_err(e)?;
+    let current: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT pause_tracking, sync_enabled, version FROM device_controls WHERE target = ?1",
+            params![target],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(e)?;
+    let (pause0, sync0, version) = current.unwrap_or((0, 1, 0));
+    let pause = pause_tracking.unwrap_or(pause0 != 0);
+    let sync = sync_enabled.unwrap_or(sync0 != 0);
+    let hlc = format!("{}:0:{me}", chrono::Utc::now().timestamp_millis());
+    conn.execute(
+        "INSERT INTO device_controls (target, uuid, pause_tracking, sync_enabled, hlc, version, synced_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+         ON CONFLICT(target) DO UPDATE SET pause_tracking = excluded.pause_tracking,
+             sync_enabled = excluded.sync_enabled, hlc = excluded.hlc, version = excluded.version",
+        params![
+            target,
+            focustrack_sync_proto::name_id("device_control", target),
+            pause,
+            sync,
+            hlc,
+            version + 1
+        ],
+    )
+    .map_err(e)?;
+    if target == me {
+        db::set_setting(conn, "paused", if pause { "1" } else { "0" }).map_err(e)?;
+    }
+    handle.wake();
+    Ok(())
+}
+
+/// Devices on the account, with names and status from their device records.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRow {
@@ -1436,36 +1601,92 @@ pub struct DeviceRow {
     pub name: String,
     pub platform: String,
     pub app_version: String,
+    /// When the device last talked to the server (≈ last sync).
     pub last_seen: Option<String>,
+    /// Synced in the last few minutes.
+    pub online: bool,
+    /// Its newest recorded usage that this device has.
+    pub last_activity: Option<String>,
+    /// Tracking is paused on it.
+    pub paused: bool,
+    /// The last sync problem it reported.
+    pub sync_error: Option<String>,
+    /// Sync was turned off for it from another device.
+    pub sync_disabled: bool,
     pub current: bool,
 }
 
 pub fn devices(handle: &SyncHandle, conn: &Connection) -> Result<Vec<DeviceRow>, String> {
+    let e = |e: rusqlite::Error| e.to_string();
     let list: Vec<DeviceInfo> = call(handle, conn, |c| c.devices()).map_err(|e| e.to_string())?;
-    let names: HashMap<String, String> = conn
-        .prepare("SELECT id, name FROM devices")
+    type Known = (String, bool, Option<String>);
+    let known: HashMap<String, Known> = conn
+        .prepare("SELECT id, name, paused, sync_error FROM devices")
         .and_then(|mut s| {
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<HashMap<_, _>, _>>()
+            s.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?),
+                ))
+            })?
+            .collect::<Result<HashMap<_, _>, _>>()
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e)?;
+    let disabled: HashMap<String, bool> = conn
+        .prepare("SELECT target, sync_enabled FROM device_controls")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? == 0))
+            })?
+            .collect::<Result<HashMap<_, _>, _>>()
+        })
+        .map_err(e)?;
+    let last_activity = |id: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT MAX(end_time) FROM usage_sessions WHERE device_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+    let now = chrono::Utc::now();
     Ok(list
         .into_iter()
-        .map(|d| DeviceRow {
-            name: if d.current {
-                device_name(conn)
-            } else {
-                names
-                    .get(&d.id)
-                    .cloned()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| "Unnamed device".into())
-            },
-            id: d.id,
-            platform: d.platform,
-            app_version: d.app_version,
-            last_seen: d.last_seen,
-            current: d.current,
+        .map(|d| {
+            let k = known.get(&d.id);
+            let online = d.current
+                || d.last_seen
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_some_and(|t| (now - t.with_timezone(&chrono::Utc)).num_minutes() < 3);
+            DeviceRow {
+                name: if d.current {
+                    device_name(conn)
+                } else {
+                    k.map(|k| k.0.clone())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| "Unnamed device".into())
+                },
+                online,
+                last_activity: last_activity(&d.id),
+                paused: if d.current {
+                    setting(conn, "paused").as_deref() == Some("1")
+                } else {
+                    k.is_some_and(|k| k.1)
+                },
+                sync_error: if d.current {
+                    setting(conn, "sync_error")
+                } else {
+                    k.and_then(|k| k.2.clone())
+                },
+                sync_disabled: !d.current && disabled.get(&d.id).copied().unwrap_or(false),
+                id: d.id,
+                platform: d.platform,
+                app_version: d.app_version,
+                last_seen: d.last_seen,
+                current: d.current,
+            }
         })
         .collect())
 }
@@ -2106,6 +2327,57 @@ mod tests {
         );
         assert_eq!(retention(&a.handle, &a.conn).unwrap(), Some(365));
         assert!(set_retention(&a.handle, &a.conn, Some(3)).is_err());
+    }
+
+    #[test]
+    fn devices_report_status_and_can_be_controlled_remotely() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        a.sync();
+        b.sync();
+        let rows = devices(&b.handle, &b.conn).unwrap();
+        let laptop = rows.iter().find(|d| d.name == "Laptop").unwrap();
+        assert!(laptop.online && !laptop.paused && !laptop.sync_disabled);
+        assert!(
+            laptop
+                .last_activity
+                .as_deref()
+                .is_some_and(|t| t.ends_with("09:30:00")),
+            "{laptop:?}"
+        );
+
+        // B pauses tracking on A; A applies it at its next sync and reports it back.
+        set_device_control(&b.handle, &b.conn, &a.id(), Some(true), None).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(
+            setting(&a.conn, "paused").as_deref(),
+            Some("1"),
+            "A is paused now"
+        );
+        a.sync(); // publishes its new status
+        b.sync();
+        let rows = devices(&b.handle, &b.conn).unwrap();
+        assert!(
+            rows.iter().find(|d| d.name == "Laptop").unwrap().paused,
+            "B sees A as paused"
+        );
+
+        // ...and resumes it.
+        set_device_control(&b.handle, &b.conn, &a.id(), Some(false), None).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(setting(&a.conn, "paused").as_deref(), Some("0"));
+
+        // B turns sync off on A: A stops syncing (only A can turn it back on).
+        set_device_control(&b.handle, &b.conn, &a.id(), None, Some(false)).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(setting(&a.conn, "sync_enabled").as_deref(), Some("0"));
+        assert!(devices(&b.handle, &b.conn)
+            .unwrap()
+            .iter()
+            .any(|d| d.name == "Laptop" && d.sync_disabled));
     }
 
     #[test]

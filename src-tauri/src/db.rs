@@ -223,6 +223,27 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v6(conn)?;
     }
 
+    if version < 7 {
+        // Device management (#66): what other devices report about themselves,
+        // and remote controls (pause tracking, sync on/off) for each device.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE devices ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE devices ADD COLUMN sync_error TEXT;
+             CREATE TABLE IF NOT EXISTS device_controls (
+                 target         TEXT PRIMARY KEY,
+                 uuid           TEXT NOT NULL UNIQUE,
+                 pause_tracking INTEGER NOT NULL DEFAULT 0,
+                 sync_enabled   INTEGER NOT NULL DEFAULT 1,
+                 hlc            TEXT NOT NULL,
+                 version        INTEGER NOT NULL DEFAULT 1,
+                 synced_version INTEGER NOT NULL DEFAULT 0
+             );
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last
     // saved — except the one about to be resumed (#12), which focus.rs handles.
     conn.execute(
@@ -939,7 +960,7 @@ mod tests {
             )
             .unwrap();
         println!("schema v{v}: {rows} usage rows (before {before}), {with_ids} with ids, {pending} to upload");
-        assert_eq!((v, rows, with_ids), (6, before, before));
+        assert_eq!((v, rows, with_ids), (7, before, before));
     }
 
     #[test]
@@ -963,7 +984,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM usage_sessions WHERE uuid IS NOT NULL",
@@ -1017,7 +1038,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
         let profiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
             .unwrap();

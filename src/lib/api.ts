@@ -119,6 +119,9 @@ export const api = {
   syncSetRetention: (days: number | null) => call<number | null>("sync_set_retention", { days }),
   /** Writes a decrypted JSON export to Downloads; returns its path. */
   syncExport: () => call<string>("sync_export"),
+  /** Pause tracking / turn sync off on a device (this one or another). */
+  syncDeviceControl: (id: string, pauseTracking: boolean | null, syncEnabled: boolean | null) =>
+    call<void>("sync_device_control", { id, pauseTracking, syncEnabled }),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

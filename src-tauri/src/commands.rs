@@ -1480,3 +1480,17 @@ pub async fn sync_export(app: AppHandle, state: State<'_, AppState>) -> CmdResul
     with_sync(&state, move |h, c| crate::sync::export(h, c, &out)).await?;
     Ok(file.to_string_lossy().into_owned())
 }
+
+/// Pause tracking or turn sync off on a device (#66).
+#[tauri::command]
+pub async fn sync_device_control(
+    state: State<'_, AppState>,
+    id: String,
+    pause_tracking: Option<bool>,
+    sync_enabled: Option<bool>,
+) -> CmdResult<()> {
+    with_sync(&state, move |h, c| {
+        crate::sync::set_device_control(h, c, &id, pause_tracking, sync_enabled)
+    })
+    .await
+}

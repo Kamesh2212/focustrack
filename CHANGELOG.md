@@ -12,6 +12,9 @@ All notable changes to this project are documented here. The format follows
   or older than a period) from the server and all your devices; delete one device's history; delete the
   account (asks for your password).
 - Sync server: retention periods, applied hourly, and an export option to download your own records.
+- **Device management** (#66): each device shows whether it's online, when it last synced, its last activity,
+  whether tracking is paused and any sync problem. Pause or resume tracking on another device, or turn its sync
+  off, from this one; it applies at that device's next sync. Database schema v7.
 
 ## [1.2.0] - 2026-11-19
 
