@@ -2203,8 +2203,7 @@ mod tests {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();
                 let conn = focustrack_server::store::open(":memory:").unwrap();
-                let app =
-                    focustrack_server::app(conn, focustrack_server::Config { trust_proxy: false });
+                let app = focustrack_server::app(conn, focustrack_server::Config::default());
                 focustrack_server::serve(listener, app, std::future::pending())
                     .await
                     .unwrap();
