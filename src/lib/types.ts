@@ -29,6 +29,17 @@ export interface AppUsage {
   kind: CategoryKind;
   secs: number;
   sessions: number;
+  /** App rows this row adds up (several: the same app on several platforms). */
+  members: number[];
+  /** Each device's part, with more than one device. */
+  devices: DeviceSecs[];
+}
+
+export interface DeviceSecs {
+  id: string;
+  name: string;
+  platform: string;
+  secs: number;
 }
 
 export interface SiteUsage {
@@ -40,6 +51,7 @@ export interface SiteUsage {
   kind: CategoryKind;
   secs: number;
   sessions: number;
+  devices: DeviceSecs[];
 }
 
 export type LimitAction = "notify" | "block" | "warn_then_block";
@@ -151,6 +163,25 @@ export interface Report {
   uniqueActiveSecs: number;
   devices: DeviceTotal[];
   devicesUniqueSecs: number;
+  /** With several devices: each one's numbers side by side. */
+  comparison: DeviceStats[];
+}
+
+export interface DeviceStats {
+  id: string;
+  name: string;
+  platform: string;
+  current: boolean;
+  activeSecs: number;
+  idleSecs: number;
+  dailyAvgSecs: number;
+  weekdayAvgSecs: number;
+  weekendAvgSecs: number;
+  productiveSecs: number;
+  distractingSecs: number;
+  topCategory: string | null;
+  topApp: string | null;
+  lastActivity: string | null;
 }
 
 export interface SessionRow {

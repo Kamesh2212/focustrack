@@ -217,6 +217,7 @@ pub fn run() {
             commands::get_dashboard,
             commands::get_live_status,
             commands::get_apps,
+            commands::get_devices,
             commands::get_categories,
             commands::set_app_category,
             commands::rename_app,

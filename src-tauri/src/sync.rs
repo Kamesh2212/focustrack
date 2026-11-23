@@ -3079,6 +3079,70 @@ mod tests {
     }
 
     #[test]
+    fn the_same_app_on_two_platforms_adds_up_and_devices_compare() {
+        use crate::analytics as an;
+        let (mut a, mut b) = pair();
+        a.use_app("chrome.exe", (9, 0), (9, 30));
+        a.use_app("Code.exe", (10, 0), (11, 0));
+        b.use_app("com.android.chrome", (12, 0), (12, 20));
+        b.use_app("com.whatsapp", (13, 0), (13, 5));
+        a.sync();
+        b.sync();
+        a.sync();
+
+        let day = today();
+        let apps = an::app_usage(&a.conn, &day, &day).unwrap();
+        let rows = an::combine_apps(&a.conn, apps, &day, &day).unwrap();
+        let used: Vec<(&str, i64, usize)> = rows
+            .iter()
+            .filter(|r| r.secs > 0)
+            .map(|r| (r.name.as_str(), r.secs, r.members.len()))
+            .collect();
+        assert_eq!(
+            used,
+            [
+                ("Code.exe", 3600, 1),
+                ("Chrome", 50 * 60, 2),
+                ("WhatsApp", 5 * 60, 1)
+            ]
+            .map(|(n, s, m)| (if n == "WhatsApp" { "com.whatsapp" } else { n }, s, m)),
+            "one Chrome total; apps without a match stay per platform"
+        );
+        let chrome = rows.iter().find(|r| r.name == "Chrome").unwrap();
+        let parts: Vec<(&str, i64)> = chrome
+            .devices
+            .iter()
+            .map(|d| (d.name.as_str(), d.secs))
+            .collect();
+        assert_eq!(parts, [("Laptop", 30 * 60), ("Desktop", 20 * 60)]);
+
+        // One device at a time: no merging across platforms needed, only its own part.
+        let ids = an::device_filter(&a.conn, Some(&b.id())).unwrap();
+        let _v = db::device_view(&a.conn, ids.as_deref()).unwrap();
+        let apps = an::app_usage(&a.conn, &day, &day).unwrap();
+        let rows = an::combine_apps(&a.conn, apps, &day, &day).unwrap();
+        let c = rows.iter().find(|r| r.name == "Chrome").unwrap();
+        assert_eq!((c.secs, c.devices.len()), (20 * 60, 1));
+        drop(_v);
+
+        let d = chrono::Local::now().date_naive();
+        let cmp = an::compare_devices(&a.conn, d, d).unwrap();
+        let got: Vec<(&str, i64, Option<&str>)> = cmp
+            .iter()
+            .map(|x| (x.name.as_str(), x.active_secs, x.top_app.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Laptop", 90 * 60, Some("Code.exe")),
+                ("Desktop", 25 * 60, Some("com.android.chrome"))
+            ]
+        );
+        // The comparison leaves no device view behind.
+        assert_eq!(an::totals(&a.conn, &day, &day).unwrap().0, 115 * 60);
+    }
+
+    #[test]
     fn secrets_are_stored_encrypted() {
         let d = device();
         let key = AccountKey::generate();

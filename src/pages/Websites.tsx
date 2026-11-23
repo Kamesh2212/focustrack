@@ -5,6 +5,7 @@ import { useLoad } from "../lib/hooks";
 import { fmtDuration, rangeFor, type RangeKey } from "../lib/format";
 import type { Category, SiteUsage } from "../lib/types";
 import { AppBadge, Bar, Card, Empty, ErrorNote, PageHeader, RangePicker } from "../components/ui";
+import { DeviceParts, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
 import { CategoryDonut } from "../components/charts";
 import { ExtensionStatus, useBrowserStatus } from "../components/ExtensionStatus";
 
@@ -33,7 +34,10 @@ export default function Websites() {
   const [range, setRange] = useState<RangeKey>("today");
   const [query, setQuery] = useState("");
   const { from, to } = rangeFor(range);
-  const sites = useLoad(() => api.websites(from, to), [from, to], 10000);
+  const [device, setDevice] = useDeviceFilter();
+  const devices = useLoad(() => api.devices(from, to), [from, to]);
+  const several = hasSeveral(devices.data ?? undefined);
+  const sites = useLoad(() => api.websites(from, to, several ? device : undefined), [from, to, several, device], 10000);
   const cats = useLoad(() => api.categories(), []);
   const browser = useBrowserStatus();
 
@@ -57,7 +61,12 @@ export default function Websites() {
       <PageHeader
         title="Websites"
         subtitle="Time on each website while its tab was active and the browser was in front. Domains only, never page content."
-        actions={<RangePicker value={range} onChange={setRange} />}
+        actions={
+          <>
+            {devices.data && <DevicePicker devices={devices.data} value={device} onChange={setDevice} />}
+            <RangePicker value={range} onChange={setRange} />
+          </>
+        }
       />
       <ErrorNote error={sites.error ?? cats.error} />
       <div className="mb-4">
@@ -100,7 +109,10 @@ export default function Websites() {
                       <td className="max-w-[240px] py-2.5 pr-3">
                         <div className="flex items-center gap-3">
                           <AppBadge name={s.domain} color={s.color} size={30} />
-                          <span className="truncate font-medium">{s.domain}</span>
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{s.domain}</div>
+                            <DeviceParts parts={s.devices} />
+                          </div>
                         </div>
                       </td>
                       <td className="py-2.5 pr-3">

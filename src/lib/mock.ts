@@ -236,9 +236,14 @@ function appsFor(from: string, to: string): AppUsage[] {
       secs += appSecs(idx, d);
       sessions += 1 + Math.floor(hash(d + name) * 6);
     }
-    return { id, name, exeName, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
+    return { id, name, exeName, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions, members: [id], devices: splitByDevice(secs) };
   });
   return out.sort((a, b) => b.secs - a.secs);
+}
+
+/** Sample: each device's part of a total. */
+function splitByDevice(secs: number) {
+  return DEVICE_SHARES.map(([d, share]) => ({ id: d.id, name: d.name, platform: d.platform, secs: Math.round(secs * share) })).filter((d) => d.secs > 0);
 }
 
 function sitesFor(from: string, to: string): SiteUsage[] {
@@ -252,7 +257,7 @@ function sitesFor(from: string, to: string): SiteUsage[] {
       secs += Math.round(mins * 60 * (0.4 + hash(d + domain) * 1.2) * portion);
       sessions += 2 + Math.floor(hash(domain + d) * 8);
     }
-    return { id, domain, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
+    return { id, domain, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions, devices: splitByDevice(secs).filter((d) => d.platform !== "android") };
   });
   return out.sort((a, b) => b.secs - a.secs);
 }
@@ -353,7 +358,7 @@ function dashboard(): Omit<Dashboard, "uniqueActiveSecs" | "devices" | "devicesU
   };
 }
 
-function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
+function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs" | "comparison"> {
   const apps = appsFor(from, to);
   const cats = categoriesFor(apps);
   const days = daysFor(from, to);
@@ -441,8 +446,24 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return appsFor(a.from, a.to);
       case "get_categories":
         return CATEGORIES;
-      case "get_report":
-        return withDevices(report(a.from, a.to), a.device);
+      case "get_report": {
+        const r = withDevices(report(a.from, a.to), a.device);
+        return {
+          ...r,
+          comparison: r.devices.map((d, i) => ({
+            ...d,
+            dailyAvgSecs: Math.round(r.dailyAvgSecs * DEVICE_SHARES[i][1]),
+            weekdayAvgSecs: Math.round(r.weekdayAvgSecs * DEVICE_SHARES[i][1]),
+            weekendAvgSecs: Math.round(r.weekendAvgSecs * DEVICE_SHARES[i][1] * (d.platform === "android" ? 1.8 : 0.7)),
+            productiveSecs: Math.round(d.activeSecs * (d.platform === "android" ? 0.15 : 0.6)),
+            distractingSecs: Math.round(d.activeSecs * (d.platform === "android" ? 0.7 : 0.2)),
+            topCategory: d.platform === "android" ? "Social Media" : "Development",
+            topApp: d.platform === "android" ? "Instagram" : "Visual Studio Code",
+          })),
+        };
+      }
+      case "get_devices":
+        return withDevices(report(a.from, a.to)).devices;
       case "get_history":
         return a.kind === "websites" ? siteHistory(a.from, a.to, a.search ?? "") : history(a.from, a.to, a.search ?? "");
       case "get_websites":

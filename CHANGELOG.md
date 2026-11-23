@@ -34,6 +34,12 @@ All notable changes to this project are documented here. The format follows
   block screen and "+15 min" like on a computer, also while FocusTrack is closed. It uses an accessibility
   service that only learns which app is open; FocusTrack explains this and asks before you turn it on
   (Settings → App blocking on this phone). The phone app, emergency calls and Settings are never blocked.
+- **The same app across devices** (#63): with several devices, Chrome on your computers and Chrome on your
+  phone add up to one Chrome total (about 25 common apps are matched across Windows, Android and iOS; others
+  stay per platform). Applications and Websites get the device filter and show each device's part.
+- **Compare devices** (#65): Reports shows your devices side by side: total, daily average, weekdays vs
+  weekends, productive vs distracting time and what each is mostly used for, plus computers vs phones and
+  the most-used device. Select one for its full report.
 
 ## [1.2.0] - 2026-11-19
 

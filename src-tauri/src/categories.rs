@@ -218,6 +218,114 @@ pub const APP_SITES: &[(&str, &str)] = &[
     ("com.discord", "discord.com"),
 ];
 
+/// The same app on Windows, Android and iOS (#63): exe name, Android package,
+/// iOS bundle ID (lower case). With several devices these add up to one total.
+pub const APP_FAMILIES: &[(&str, &[&str])] = &[
+    (
+        "Chrome",
+        &["chrome.exe", "com.android.chrome", "com.google.chrome.ios"],
+    ),
+    (
+        "Firefox",
+        &[
+            "firefox.exe",
+            "org.mozilla.firefox",
+            "org.mozilla.ios.firefox",
+        ],
+    ),
+    (
+        "Microsoft Edge",
+        &["msedge.exe", "com.microsoft.emmx", "com.microsoft.msedge"],
+    ),
+    ("Brave", &["brave.exe", "com.brave.browser"]),
+    ("Opera", &["opera.exe", "com.opera.browser"]),
+    (
+        "Spotify",
+        &["spotify.exe", "com.spotify.music", "com.spotify.client"],
+    ),
+    (
+        "Discord",
+        &["discord.exe", "com.discord", "com.hammerandchisel.discord"],
+    ),
+    (
+        "WhatsApp",
+        &["whatsapp.exe", "com.whatsapp", "net.whatsapp.whatsapp"],
+    ),
+    (
+        "Telegram",
+        &[
+            "telegram.exe",
+            "org.telegram.messenger",
+            "ph.telegra.telegraph",
+        ],
+    ),
+    (
+        "Signal",
+        &[
+            "signal.exe",
+            "org.thoughtcrime.securesms",
+            "org.whispersystems.signal",
+        ],
+    ),
+    (
+        "Slack",
+        &["slack.exe", "com.slack", "com.tinyspeck.chatlyio"],
+    ),
+    (
+        "Microsoft Teams",
+        &[
+            "ms-teams.exe",
+            "teams.exe",
+            "com.microsoft.teams",
+            "com.microsoft.skype.teams",
+        ],
+    ),
+    ("Zoom", &["zoom.exe", "us.zoom.videomeetings"]),
+    ("Skype", &["skype.exe", "com.skype.raider"]),
+    (
+        "Outlook",
+        &["outlook.exe", "olk.exe", "com.microsoft.office.outlook"],
+    ),
+    ("Word", &["winword.exe", "com.microsoft.office.word"]),
+    ("Excel", &["excel.exe", "com.microsoft.office.excel"]),
+    (
+        "PowerPoint",
+        &["powerpnt.exe", "com.microsoft.office.powerpoint"],
+    ),
+    (
+        "OneNote",
+        &[
+            "onenote.exe",
+            "com.microsoft.office.onenote",
+            "com.microsoft.onenote",
+        ],
+    ),
+    ("Notion", &["notion.exe", "notion.id"]),
+    ("Obsidian", &["obsidian.exe", "md.obsidian"]),
+    (
+        "VLC",
+        &["vlc.exe", "org.videolan.vlc", "org.videolan.vlc-ios"],
+    ),
+    (
+        "Steam",
+        &["steam.exe", "com.valvesoftware.android.steam.community"],
+    ),
+    ("Anki", &["anki.exe", "com.ichi2.anki"]),
+    (
+        "Kindle",
+        &["kindle.exe", "com.amazon.kindle", "com.amazon.lassen"],
+    ),
+];
+
+/// The cross-platform app this exe, package or bundle ID belongs to, if known.
+pub fn app_family(exe: &str) -> Option<&'static str> {
+    let e = exe.to_ascii_lowercase();
+    APP_FAMILIES
+        .iter()
+        .find(|(_, keys)| keys.contains(&e.as_str()))
+        .map(|(name, _)| *name)
+}
+
 /// Phone apps for a website limit's domain.
 pub fn apps_for_site(domain: &str) -> Vec<&'static str> {
     let d = domain.trim_start_matches("www.").to_ascii_lowercase();

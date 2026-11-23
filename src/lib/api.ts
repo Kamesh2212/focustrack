@@ -19,6 +19,7 @@ import type {
   Notebook,
   Profile,
   Resource,
+  DeviceTotal,
   LimitReach,
   LimitStatus,
   LiveStatus,
@@ -44,7 +45,10 @@ export const api = {
   /** `device`: "all", "desktop", "mobile" or a device id. */
   dashboard: (device = "all") => call<Dashboard>("get_dashboard", { device }),
   liveStatus: () => call<LiveStatus>("get_live_status"),
-  apps: (from: string, to: string) => call<AppUsage[]>("get_apps", { from, to }),
+  /** `combine`: the same app on several platforms is one row, with each device's part. */
+  apps: (from: string, to: string, opts: { combine?: boolean; device?: string } = {}) =>
+    call<AppUsage[]>("get_apps", { from, to, combine: opts.combine ?? false, device: opts.device ?? null }),
+  devices: (from: string, to: string) => call<DeviceTotal[]>("get_devices", { from, to }),
   categories: () => call<Category[]>("get_categories"),
   setAppCategory: (appId: number, categoryId: number | null) =>
     call<void>("set_app_category", { appId, categoryId }),
@@ -54,7 +58,7 @@ export const api = {
     call<SessionRow[]>("get_history", { from, to, search, limit, kind }),
   exportCsv: (from: string, to: string, search: string, kind: HistoryKind) =>
     call<string>("export_csv", { from, to, search, kind }),
-  websites: (from: string, to: string) => call<SiteUsage[]>("get_websites", { from, to }),
+  websites: (from: string, to: string, device?: string) => call<SiteUsage[]>("get_websites", { from, to, device: device ?? null }),
   setWebsiteCategory: (websiteId: number, categoryId: number | null) =>
     call<void>("set_website_category", { websiteId, categoryId }),
   browserStatus: () => call<BrowserStatus>("get_browser_status"),

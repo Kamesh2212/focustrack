@@ -85,6 +85,7 @@ pub fn get_dashboard(state: State<'_, AppState>, device: Option<String>) -> CmdR
     let week = an::daily_totals(&conn, today - Duration::days(6), today).map_err(err)?;
     let month = an::daily_totals(&conn, today - Duration::days(29), today).map_err(err)?;
     let apps = an::app_usage(&conn, &t, &t).map_err(err)?;
+    let apps = an::combine_apps(&conn, apps, &t, &t).map_err(err)?;
     let sites = an::site_usage(&conn, &t, &t).map_err(err)?;
     let site_secs = an::site_total(&conn, &t, &t).map_err(err)?;
     let categories = an::category_usage(&conn, &t, &t).map_err(err)?;
@@ -132,12 +133,40 @@ pub struct Category {
     pub kind: String,
 }
 
+/// Apps in the range. `combine`: the same app on several platforms is one row,
+/// with each device's part (#63); `device` limits it to some devices.
 #[tauri::command]
-pub fn get_apps(state: State<'_, AppState>, from: String, to: String) -> CmdResult<Vec<AppUsage>> {
+pub fn get_apps(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    combine: Option<bool>,
+    device: Option<String>,
+) -> CmdResult<Vec<AppUsage>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
-    an::app_usage(&conn, &from, &to).map_err(err)
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
+    let apps = an::app_usage(&conn, &from, &to).map_err(err)?;
+    if combine.unwrap_or(false) {
+        an::combine_apps(&conn, apps, &from, &to).map_err(err)
+    } else {
+        Ok(apps)
+    }
+}
+
+/// Screen time per device in the range (for the device filter).
+#[tauri::command]
+pub fn get_devices(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> CmdResult<Vec<an::DeviceTotal>> {
+    an::parse_day(&from)?;
+    an::parse_day(&to)?;
+    let conn = conn!(state);
+    an::device_totals(&conn, &from, &to).map_err(err)
 }
 
 #[tauri::command]
@@ -220,6 +249,8 @@ pub struct Report {
     pub unique_active_secs: i64,
     pub devices: Vec<an::DeviceTotal>,
     pub devices_unique_secs: i64,
+    /// With several devices: each one's numbers side by side (#65).
+    pub comparison: Vec<an::DeviceStats>,
 }
 
 #[tauri::command]
@@ -236,6 +267,12 @@ pub fn get_report(
     let conn = conn!(state);
     let devices = an::device_totals(&conn, &from, &to).map_err(err)?;
     let devices_unique_secs = an::union_secs(&an::active_spans(&conn, &from, &to).map_err(err)?);
+    // Before this report's own device view: it sets one per device.
+    let comparison = if devices.len() > 1 {
+        an::compare_devices(&conn, f, t).map_err(err)?
+    } else {
+        Vec::new()
+    };
     let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
     let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
     let len = (t - f).num_days() + 1;
@@ -245,7 +282,9 @@ pub fn get_report(
     let (prev_active, _) = an::totals(&conn, &an::fmt_day(pf), &an::fmt_day(pt)).map_err(err)?;
     let days = an::daily_totals(&conn, f, t).map_err(err)?;
     let apps = an::app_usage(&conn, &from, &to).map_err(err)?;
+    let apps = an::combine_apps(&conn, apps, &from, &to).map_err(err)?;
     let sites = an::site_usage(&conn, &from, &to).map_err(err)?;
+    let sites = an::sites_by_device(&conn, sites, &from, &to).map_err(err)?;
     let site_secs = an::site_total(&conn, &from, &to).map_err(err)?;
     let categories = an::category_usage(&conn, &from, &to).map_err(err)?;
     let spans = an::active_spans(&conn, &from, &to).map_err(err)?;
@@ -293,6 +332,7 @@ pub fn get_report(
         unique_active_secs: an::union_secs(&spans),
         devices,
         devices_unique_secs,
+        comparison,
     })
 }
 
@@ -661,11 +701,15 @@ pub fn get_websites(
     state: State<'_, AppState>,
     from: String,
     to: String,
+    device: Option<String>,
 ) -> CmdResult<Vec<SiteUsage>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
-    an::site_usage(&conn, &from, &to).map_err(err)
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
+    let sites = an::site_usage(&conn, &from, &to).map_err(err)?;
+    an::sites_by_device(&conn, sites, &from, &to).map_err(err)
 }
 
 #[tauri::command]

@@ -5,6 +5,7 @@ import { useLoad } from "../lib/hooks";
 import { fmtDuration, rangeFor, type RangeKey } from "../lib/format";
 import type { AppUsage, Category } from "../lib/types";
 import { AppBadge, Bar, Card, Empty, ErrorNote, PageHeader, RangePicker } from "../components/ui";
+import { DeviceParts, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
 
 function NameCell({ app, onSaved }: { app: AppUsage; onSaved: () => void }) {
   const [editing, setEditing] = useState(false);
@@ -42,8 +43,12 @@ function NameCell({ app, onSaved }: { app: AppUsage; onSaved: () => void }) {
     <div className="group flex min-w-0 items-center gap-1">
       <div className="min-w-0">
         <div className="truncate font-medium">{app.name}</div>
-        <div className="truncate text-xs text-slate-400">{app.exeName}</div>
+        <div className="truncate text-xs text-slate-400">
+          {app.members.length > 1 ? `${app.exeName} and ${app.members.length - 1} more (other platforms)` : app.exeName}
+        </div>
+        <DeviceParts parts={app.devices} />
       </div>
+      {app.members.length === 1 && (
       <button
         onClick={() => {
           setName(app.name);
@@ -54,6 +59,7 @@ function NameCell({ app, onSaved }: { app: AppUsage; onSaved: () => void }) {
       >
         <Pencil size={13} />
       </button>
+      )}
     </div>
   );
 }
@@ -63,7 +69,8 @@ function CategorySelect({ app, categories, onChange }: { app: AppUsage; categori
     <select
       value={app.categoryId ?? ""}
       onChange={async (e) => {
-        await api.setAppCategory(app.id, e.target.value ? Number(e.target.value) : null);
+        // The same app on every platform gets the category.
+        for (const id of app.members) await api.setAppCategory(id, e.target.value ? Number(e.target.value) : null);
         onChange();
       }}
       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
@@ -83,7 +90,11 @@ export default function Applications() {
   const [range, setRange] = useState<RangeKey>("today");
   const [query, setQuery] = useState("");
   const { from, to } = rangeFor(range);
-  const apps = useLoad(() => api.apps(from, to), [from, to], 10000);
+  const [device, setDevice] = useDeviceFilter();
+  const devices = useLoad(() => api.devices(from, to), [from, to]);
+  const several = hasSeveral(devices.data ?? undefined);
+  // With several devices: one row per app across platforms, each device's part under it (#63).
+  const apps = useLoad(() => api.apps(from, to, several ? { combine: true, device } : {}), [from, to, several, device], 10000);
   const cats = useLoad(() => api.categories(), []);
 
   const q = query.trim().toLowerCase();
@@ -98,7 +109,12 @@ export default function Applications() {
       <PageHeader
         title="Applications"
         subtitle="Time in each app while it was in the foreground. Change a category to re-classify all of its history."
-        actions={<RangePicker value={range} onChange={setRange} />}
+        actions={
+          <>
+            {devices.data && <DevicePicker devices={devices.data} value={device} onChange={setDevice} />}
+            <RangePicker value={range} onChange={setRange} />
+          </>
+        }
       />
       <ErrorNote error={apps.error ?? cats.error} />
       <Card>
