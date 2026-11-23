@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="focustrack_blocker_label">FocusTrack app blocking</string>
+    <string name="focustrack_blocker_description">FocusTrack uses this to block apps you have set a daily limit for, or that your focus session blocks. It only learns which app is open (its package name), never what is on the screen or what you type, and keeps this on your phone. Turn it off any time.</string>
+</resources>

@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format follows
 - **Goals across devices** (#72): goal progress counts every synced device, and with more than one device
   each goal shows how much came from each. "Goal achieved", "goal missed" and the evening reminder appear on
   one device only. Changing a goal lets it notify again. Database schema v11.
+- **App blocking on Android** (#69): limits and focus sessions now block apps on the phone, with FocusTrack's
+  block screen and "+15 min" like on a computer, also while FocusTrack is closed. It uses an accessibility
+  service that only learns which app is open; FocusTrack explains this and asks before you turn it on
+  (Settings → App blocking on this phone). The phone app, emergency calls and Settings are never blocked.
 
 ## [1.2.0] - 2026-11-19
 

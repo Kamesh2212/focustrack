@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Smartphone } from "lucide-react";
+import { ShieldCheck, Smartphone } from "lucide-react";
 import { api } from "../lib/api";
 import { isPhone, usePlatform } from "../lib/platform";
 import { Button, Card } from "./ui";
@@ -59,6 +59,84 @@ export function PhoneAccessBanner() {
         Allow
       </Button>
     </div>
+  );
+}
+
+/**
+ * Phones: app blocking (#69) uses an Android accessibility service. Google Play
+ * requires a clear explanation and the user's agreement before sending them
+ * to turn it on, so the card shows both first.
+ */
+export function PhoneBlockingCard() {
+  const p = usePlatform();
+  const phone = p === "android";
+  const [on, setOn] = useState<boolean | null>(null);
+  const [asking, setAsking] = useState(false);
+
+  useEffect(() => {
+    if (!phone) return;
+    const check = () => api.phoneBlocking().then(setOn).catch(() => setOn(false));
+    check();
+    const onVisible = () => document.visibilityState === "visible" && check();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [phone]);
+
+  if (!phone) return null;
+  return (
+    <Card title="App blocking on this phone">
+      <div className="text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="max-w-xl">
+            <div className="font-medium">{on ? "App blocking is on" : "App blocking is off"}</div>
+            <div className="mt-0.5 text-xs text-slate-500">
+              Blocks apps when their daily limit is used up, and the apps your focus session blocks. The phone app,
+              emergency calls and Settings are never blocked.
+            </div>
+          </div>
+          {!asking && (
+            <Button onClick={() => (on ? api.openPhoneBlocking().catch(() => {}) : setAsking(true))}>{on ? "Manage" : "Turn on"}</Button>
+          )}
+        </div>
+        {asking && (
+          <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100">
+            <div className="mb-1 flex items-center gap-1.5 font-medium">
+              <ShieldCheck size={15} /> FocusTrack uses Android's Accessibility service
+            </div>
+            <ul className="ml-4 list-disc space-y-1 text-xs">
+              <li>
+                <b>What it sees:</b> only which app is open (its name). Never what's on the screen, what you type or
+                anything inside apps.
+              </li>
+              <li>
+                <b>What it does:</b> shows FocusTrack's block screen over an app that is over its daily limit or blocked by
+                your focus session.
+              </li>
+              <li>
+                <b>Where it goes:</b> nowhere. It stays on this phone; it isn't sent to FocusTrack or anyone else.
+              </li>
+              <li>You can turn it off any time in Settings &gt; Accessibility.</li>
+            </ul>
+            <p className="mt-2 text-xs">
+              On the next screen, open <b>FocusTrack app blocking</b> and turn it on. Android may first ask you to allow
+              restricted settings for FocusTrack (in its App info).
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setAsking(false);
+                  api.openPhoneBlocking().catch(() => {});
+                }}
+              >
+                I agree, open settings
+              </Button>
+              <Button onClick={() => setAsking(false)}>Not now</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 

@@ -107,6 +107,9 @@ export const api = {
   platform: () => call<string>("get_platform"),
   insets: () => call<{ top: number; bottom: number }>("get_insets"),
   phoneUsageAccess: () => call<boolean>("phone_usage_access"),
+  /** Phones: whether app blocking is on, and the settings screen to turn it on (#69). */
+  phoneBlocking: () => call<boolean>("phone_blocking"),
+  openPhoneBlocking: () => call<void>("open_phone_blocking"),
   openUsageAccess: () => call<void>("open_usage_access"),
   /** New sessions imported, or null without usage access. */
   importPhoneUsage: () => call<number | null>("import_phone_usage"),

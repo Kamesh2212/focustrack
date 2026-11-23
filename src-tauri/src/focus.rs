@@ -579,6 +579,62 @@ fn create_run(
     })
 }
 
+/// The session a phone must enforce now, even with FocusTrack closed (#69):
+/// this device's own (saved while it runs, #12) or one shared with it (#71).
+/// Returns (name, blocking until, profile).
+pub fn blocking_session(
+    conn: &Connection,
+    at: NaiveDateTime,
+) -> rusqlite::Result<Option<(String, NaiveDateTime, Option<i64>)>> {
+    let saved = db::get_setting(conn, ACTIVE_KEY)?
+        .filter(|s| !s.is_empty())
+        .and_then(|raw| serde_json::from_str::<SavedFocus>(&raw).ok());
+    if let Some(s) = saved {
+        if let Some(end) = db::parse_time(&s.end) {
+            let open_on_breaks = s
+                .plan
+                .profile_id
+                .and_then(|id| profiles::get(conn, id).ok().flatten())
+                .is_some_and(|p| p.unblock_on_breaks);
+            let until = match (open_on_breaks, s.phase) {
+                (true, Phase::Break) => None,
+                (true, Phase::Focus) => Some(end),
+                _ => Some(end + Duration::seconds(rest_of_plan_secs(&s.plan, s.phase, s.round))),
+            };
+            if let Some(u) = until.filter(|u| *u > at) {
+                return Ok(Some((s.plan.label, u, s.plan.profile_id)));
+            }
+        }
+    }
+    let me = db::get_setting(conn, "device_id")?.unwrap_or_default();
+    let rows: Vec<(String, i64, String, Option<i64>)> = conn
+        .prepare(
+            "SELECT r.plan, r.planned_end_utc, r.devices, (SELECT id FROM block_profiles WHERE uuid = r.profile_uuid)
+             FROM focus_runs r
+             WHERE r.ended_utc IS NULL AND r.planned_end_utc > unixepoch() AND r.origin IS NOT ?1
+             ORDER BY r.start_utc DESC",
+        )?
+        .query_map(params![me], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    for (plan, end, devices, profile) in rows {
+        let devices: Vec<String> = serde_json::from_str(&devices).unwrap_or_default();
+        let Ok(plan) = serde_json::from_str::<FocusPlan>(&plan) else {
+            continue;
+        };
+        let Some(until) = chrono::DateTime::from_timestamp(end, 0) else {
+            continue;
+        };
+        if devices.iter().any(|d| d == "*" || *d == me) {
+            return Ok(Some((
+                plan.label,
+                until.with_timezone(&Local).naive_local(),
+                profile,
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// Marks a shared session as over, for the other devices.
 fn end_run(conn: &Connection, id: &str, early: bool) -> rusqlite::Result<()> {
     conn.execute(

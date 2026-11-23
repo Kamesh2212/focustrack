@@ -1428,6 +1428,20 @@ pub fn open_usage_access(app: AppHandle) -> CmdResult<()> {
     app.usage().open_access_settings()
 }
 
+/// Phones: whether app blocking (an accessibility service) is on (#69).
+#[tauri::command]
+pub fn phone_blocking(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().blocking_enabled()
+}
+
+/// Opens Android's accessibility settings, after FocusTrack's explanation.
+#[tauri::command]
+pub fn open_phone_blocking(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().open_blocking_settings()
+}
+
 /// Imports new phone usage now (when the app comes to the front). Returns how
 /// many sessions were added, or null without usage access.
 #[tauri::command]

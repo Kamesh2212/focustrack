@@ -90,6 +90,24 @@ class UsagePlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve()
     }
 
+    /** Whether FocusTrack's blocker (an accessibility service) is turned on (#69). */
+    @Command
+    fun blockingStatus(invoke: Invoke) {
+        val ret = JSObject()
+        ret.put("enabled", Blocker.enabled(activity))
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun openBlockingSettings(invoke: Invoke) {
+        try {
+            activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Couldn't open the accessibility settings: ${e.message}")
+        }
+    }
+
     @Command
     fun events(invoke: Invoke) {
         if (!granted()) {

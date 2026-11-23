@@ -275,7 +275,198 @@ pub fn background_run(data_dir: &std::path::Path, input_json: &str) -> Backgroun
             Err(e) => out.error = Some(format!("sync: {e}")),
         }
     }
+    if let Err(e) = write_blocks(&conn, data_dir, &mut String::new()) {
+        out.error.get_or_insert(format!("blocks: {e}"));
+    }
     out
+}
+
+// ---------------------------------------------------------- blocking (#69)
+
+/// What the Android blocker (an accessibility service in `plugins/usage`)
+/// enforces. Written to `blocks.json` next to the database, so it works with
+/// FocusTrack closed.
+#[derive(Debug, Default, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockPlan {
+    /// `used_secs` counts this phone's usage up to here (Unix ms); the blocker
+    /// adds what Android recorded since.
+    pub counted_until: i64,
+    /// Start of today (Unix ms): earlier usage doesn't count toward limits.
+    pub day_start: i64,
+    pub focus: Option<FocusBlock>,
+    pub limits: Vec<LimitBlock>,
+    /// "+15 min" extensions left today.
+    pub extensions_left: i64,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusBlock {
+    pub label: String,
+    /// Unix ms.
+    pub until: i64,
+    /// `block`: `packages` are blocked; `allow_only`: everything else is.
+    pub mode: String,
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitBlock {
+    pub id: i64,
+    pub name: String,
+    pub packages: Vec<String>,
+    /// The limit plus today's extensions.
+    pub allowed_secs: i64,
+    pub used_secs: i64,
+    /// `block` | `warn_then_block`
+    pub action: String,
+}
+
+/// Android package names look like `com.example.app` (not `app.exe` or a path).
+fn is_package(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.contains('.') && !k.ends_with(".exe") && !k.contains(['\\', '/', ' '])
+}
+
+fn ms(t: NaiveDateTime) -> i64 {
+    Local
+        .from_local_datetime(&t)
+        .earliest()
+        .map(|t| t.timestamp_millis())
+        .unwrap_or_else(|| t.and_utc().timestamp_millis())
+}
+
+pub fn block_plan(conn: &Connection, now: NaiveDateTime) -> rusqlite::Result<BlockPlan> {
+    let mut limits = Vec::new();
+    for l in crate::limits::current_status(conn, now)? {
+        if !l.enabled || l.action == "notify" {
+            continue;
+        }
+        let packages: Vec<String> = if l.target_type == "app" {
+            if is_package(&l.key) {
+                vec![l.key.to_ascii_lowercase()]
+            } else {
+                Vec::new()
+            }
+        } else if l.reach == "all" {
+            // youtube.com across devices: the YouTube app on the phone (#70).
+            crate::categories::apps_for_site(&l.key)
+                .into_iter()
+                .map(String::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !packages.is_empty() {
+            limits.push(LimitBlock {
+                id: l.id,
+                name: l.name.clone(),
+                packages,
+                allowed_secs: l.daily_limit_secs + l.extra_secs,
+                used_secs: l.used_secs,
+                action: l.action.clone(),
+            });
+        }
+    }
+    let focus = match crate::focus::blocking_session(conn, now)? {
+        Some((label, until, profile)) => {
+            let preview = profile.and_then(|id| crate::focus::preview(conn, id).ok());
+            preview.map(|(_, p)| {
+                let apps = if p.mode == "allow_only" {
+                    &p.allowed_apps
+                } else {
+                    &p.blocked_apps
+                };
+                let mut packages: Vec<String> = apps
+                    .iter()
+                    .map(|a| a.exe_name.to_ascii_lowercase())
+                    .filter(|e| is_package(e))
+                    .collect();
+                packages.sort();
+                packages.dedup();
+                FocusBlock {
+                    label,
+                    until: ms(until),
+                    mode: p.mode.clone(),
+                    packages,
+                }
+            })
+        }
+        None => None,
+    };
+    let day = crate::limits::limit_day(conn, now)?;
+    let per_day = db::load_settings(conn)?.overrides_per_day;
+    let used: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(count), 0) FROM limit_overrides WHERE day = ?1",
+        rusqlite::params![day],
+        |r| r.get(0),
+    )?;
+    let day_start = ms(now.date().and_hms_opt(0, 0, 0).unwrap_or(now));
+    // Nothing imported yet: none of today's phone usage is counted.
+    let counted_until = db::get_setting(conn, "phone_usage_since")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(day_start);
+    Ok(BlockPlan {
+        counted_until,
+        day_start,
+        focus,
+        limits,
+        extensions_left: (per_day - used).max(0),
+    })
+}
+
+/// Writes the plan for the blocker if it changed; returns whether it did.
+pub fn write_blocks(
+    conn: &Connection,
+    data_dir: &std::path::Path,
+    last: &mut String,
+) -> Result<bool, String> {
+    let plan = block_plan(conn, Local::now().naive_local()).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
+    if json == *last {
+        return Ok(false);
+    }
+    let tmp = data_dir.join("blocks.json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, data_dir.join("blocks.json")).map_err(|e| e.to_string())?;
+    *last = json;
+    Ok(true)
+}
+
+/// "+15 min" on the phone's block screen: the same rules as on a computer.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn extend_limit(data_dir: &std::path::Path, limit_id: i64) -> Result<(), String> {
+    let conn = db::open(&data_dir.join("focustrack.db")).map_err(|e| e.to_string())?;
+    let now = Local::now().naive_local();
+    let day = crate::limits::limit_day(&conn, now).map_err(|e| e.to_string())?;
+    let per_day = db::load_settings(&conn)
+        .map_err(|e| e.to_string())?
+        .overrides_per_day;
+    crate::limits::override_limit(&conn, limit_id, &day, per_day)?;
+    write_blocks(&conn, data_dir, &mut String::new())?;
+    Ok(())
+}
+
+/// JNI entry point for the block screen's "+15 min" (`com.focustrack.usage.Blocker.extend`).
+/// Returns "" when it worked, otherwise the reason.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_focustrack_usage_Blocker_extend<'l>(
+    mut env: jni::JNIEnv<'l>,
+    _class: jni::objects::JClass<'l>,
+    data_dir: jni::objects::JString<'l>,
+    limit_id: jni::sys::jlong,
+) -> jni::objects::JString<'l> {
+    let dir: String = env
+        .get_string(&data_dir)
+        .map(Into::into)
+        .unwrap_or_default();
+    let result = std::panic::catch_unwind(|| extend_limit(std::path::Path::new(&dir), limit_id))
+        .unwrap_or_else(|_| Err("FocusTrack couldn't add the time".into()));
+    env.new_string(result.err().unwrap_or_default())
+        .unwrap_or_else(|_| jni::objects::JObject::null().into())
 }
 
 /// JNI entry point for the WorkManager job in `plugins/usage`
@@ -327,13 +518,25 @@ pub fn spawn<R: tauri::Runtime>(
                     return;
                 }
             };
+            // Import every minute; keep the blocker's plan current every few
+            // seconds (a limit or focus session started in the app) (#69).
+            let mut last_import: Option<std::time::Instant> = None;
+            let mut last_plan = String::new();
             loop {
-                match import(&app, &conn) {
-                    Ok(Some(n)) if n > 0 => sync.wake(),
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[phone] usage import failed: {e}"),
+                if last_import.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(60)) {
+                    last_import = Some(std::time::Instant::now());
+                    match import(&app, &conn) {
+                        Ok(Some(n)) if n > 0 => sync.wake(),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[phone] usage import failed: {e}"),
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                if let Some(dir) = db_path.parent() {
+                    if let Err(e) = write_blocks(&conn, dir, &mut last_plan) {
+                        eprintln!("[phone] couldn't update the block plan: {e}");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         })
         .expect("failed to spawn phone usage thread");
@@ -342,6 +545,127 @@ pub fn spawn<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_plan_has_phone_limits_and_the_focus_session() {
+        let conn = db::open_in_memory().unwrap();
+        let now = Local::now().naive_local();
+        let t = now.date().and_hms_opt(0, 1, 0).unwrap();
+        let insta =
+            db::get_or_create_app(&conn, "com.instagram.android", "", || "Instagram".into(), t)
+                .unwrap()
+                .0;
+        let code = db::get_or_create_app(&conn, "Code.exe", "", || "VS Code".into(), t)
+            .unwrap()
+            .0;
+        let s = db::insert_usage(&conn, insta, t).unwrap();
+        db::update_span(
+            &conn,
+            db::SpanKind::Usage,
+            s,
+            t,
+            t + chrono::Duration::minutes(20),
+        )
+        .unwrap();
+        let yt = db::get_or_create_website(&conn, "youtube.com", t).unwrap();
+        for (kind, id, action, reach) in [
+            ("app", insta, "block", "device"),
+            ("app", code, "block", "device"), // a computer app: not on the phone
+            ("website", yt, "warn_then_block", "all"), // the YouTube app counts
+        ] {
+            conn.execute(
+                "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action, reach)
+                 VALUES (?1, ?2, 1800, ?3, ?4)",
+                rusqlite::params![kind, id, action, reach],
+            )
+            .unwrap();
+        }
+        let plan = block_plan(&conn, now).unwrap();
+        let got: Vec<(&str, Vec<String>, i64, i64)> = plan
+            .limits
+            .iter()
+            .map(|l| {
+                (
+                    l.action.as_str(),
+                    l.packages.clone(),
+                    l.allowed_secs,
+                    l.used_secs,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "block",
+                    vec!["com.instagram.android".to_string()],
+                    1800,
+                    1200
+                ),
+                (
+                    "warn_then_block",
+                    vec!["com.google.android.youtube".to_string()],
+                    1800,
+                    0
+                ),
+            ]
+        );
+        assert!(plan.focus.is_none());
+        assert_eq!(plan.extensions_left, 1);
+
+        // A focus session with Study Mode blocks Instagram (Social Media) on the phone.
+        let shared = crate::tracker::Shared::new(false, 300);
+        let study: i64 = conn
+            .query_row(
+                "SELECT id FROM block_profiles WHERE name = 'Study Mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let st = crate::focus::start(
+            &conn,
+            &shared,
+            crate::focus::FocusPlan {
+                label: "Exam prep".into(),
+                focus_mins: 25,
+                break_mins: 5,
+                long_break_mins: 0,
+                rounds: 2,
+                profile_id: Some(study),
+                mode: "focus".into(),
+                subject: None,
+                goal_text: None,
+                goal_id: None,
+            },
+            vec![],
+        )
+        .unwrap();
+        let f = block_plan(&conn, now).unwrap().focus.expect("focus");
+        assert_eq!((f.label.as_str(), f.mode.as_str()), ("Exam prep", "block"));
+        assert!(
+            f.packages.contains(&"com.instagram.android".to_string()),
+            "{:?}",
+            f.packages
+        );
+        assert!(!f.packages.iter().any(|p| p.ends_with(".exe")));
+        assert_eq!(f.until, ms(db::parse_time(&st.plan_ends_at).unwrap()));
+        crate::focus::stop(&conn, &shared, Some(crate::focus::STOP_PHRASE)).unwrap();
+        assert!(block_plan(&conn, now).unwrap().focus.is_none());
+    }
+
+    #[test]
+    fn plan_file_is_written_only_when_it_changes() {
+        let conn = db::open_in_memory().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("ft-blocks-{}", focustrack_sync_proto::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut last = String::new();
+        assert!(write_blocks(&conn, &dir, &mut last).unwrap());
+        assert!(!write_blocks(&conn, &dir, &mut last).unwrap());
+        let text = std::fs::read_to_string(dir.join("blocks.json")).unwrap();
+        assert!(text.contains("\"extensionsLeft\":1"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn ev(package: &str, kind: i32, secs: i64) -> UsageEvent {
         UsageEvent {

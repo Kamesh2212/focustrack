@@ -292,6 +292,8 @@ pub fn run() {
             commands::get_insets,
             commands::phone_usage_access,
             commands::open_usage_access,
+            commands::phone_blocking,
+            commands::open_phone_blocking,
             commands::import_phone_usage,
         ])
         .run(tauri::generate_context!())

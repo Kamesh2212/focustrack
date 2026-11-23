@@ -134,6 +134,7 @@ let notes: Note[] = [
 ];
 let nextNoteId = 4;
 
+let phoneBlocking = false;
 let phoneAccess = false;
 let retention: number | null = null;
 const mockPaused: Record<string, boolean> = {};
@@ -568,6 +569,11 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return phoneAccess;
       case "open_usage_access":
         phoneAccess = true;
+        return null;
+      case "phone_blocking":
+        return phoneBlocking;
+      case "open_phone_blocking":
+        phoneBlocking = true;
         return null;
       case "import_phone_usage":
         return phoneAccess ? 3 : null;

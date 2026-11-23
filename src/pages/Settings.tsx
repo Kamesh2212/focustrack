@@ -6,7 +6,7 @@ import type { Settings as SettingsT, Theme } from "../lib/types";
 import { Button, Card, ConfirmButton, ErrorNote, PageHeader, Segmented, Toggle } from "../components/ui";
 import { InstallSteps, browserLabel, StatusDot, useBrowserStatus } from "../components/ExtensionStatus";
 import { SyncSettings } from "../components/SyncSettings";
-import { PhoneAccessCard } from "../components/PhoneAccess";
+import { PhoneAccessCard, PhoneBlockingCard } from "../components/PhoneAccess";
 import { isPhone, usePlatform } from "../lib/platform";
 
 const IDLE_OPTIONS = [60, 120, 180, 300, 600, 900, 1800];
@@ -68,6 +68,7 @@ export default function Settings({ onThemeChange }: { onThemeChange: (t: Theme) 
 
       <div className="grid gap-4 xl:grid-cols-2">
         <PhoneAccessCard />
+        <PhoneBlockingCard />
         {!phone && (
         <>
         <Card title="Tracking">
