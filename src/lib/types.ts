@@ -62,7 +62,13 @@ export interface LimitStatus {
   path: string;
   /** Launcher limits: the folder whose programs this limit also covers. */
   scope: string | null;
+  /** "device": this device's usage counts; "all": every synced device's. */
+  reach: LimitReach;
+  /** With reach "all": the part of usedSecs from other devices. */
+  othersSecs: number;
 }
+
+export type LimitReach = "device" | "all";
 
 export interface BrowserStatus {
   serverRunning: boolean;

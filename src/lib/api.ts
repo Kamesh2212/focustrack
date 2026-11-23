@@ -19,6 +19,7 @@ import type {
   Notebook,
   Profile,
   Resource,
+  LimitReach,
   LimitStatus,
   LiveStatus,
   Report,
@@ -58,7 +59,15 @@ export const api = {
     call<void>("set_website_category", { websiteId, categoryId }),
   browserStatus: () => call<BrowserStatus>("get_browser_status"),
   limits: () => call<LimitStatus[]>("get_limits"),
-  setLimit: (l: { targetType: "app" | "website"; targetId: number; dailyLimitSecs: number; warnPct: number; action: LimitAction; enabled: boolean }) =>
+  setLimit: (l: {
+    targetType: "app" | "website";
+    targetId: number;
+    dailyLimitSecs: number;
+    warnPct: number;
+    action: LimitAction;
+    enabled: boolean;
+    reach: LimitReach;
+  }) =>
     call<void>("set_limit", l),
   overrideLimit: (id: number) => call<void>("override_limit", { id }),
   setOverridesPerDay: (count: number) => call<void>("set_overrides_per_day", { count }),

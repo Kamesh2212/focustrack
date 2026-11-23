@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format follows
 - **Device management** (#66): each device shows whether it's online, when it last synced, its last activity,
   whether tracking is paused and any sync problem. Pause or resume tracking on another device, or turn its sync
   off, from this one; it applies at that device's next sync. Database schema v7.
+- **Limits across devices** (#70): a limit can count usage on all your synced devices instead of just this
+  one; a website limit then also counts the site's phone app (youtube.com counts the YouTube app). The limits
+  list shows how much came from other devices. Other devices' time arrives when they sync, so blocking can lag
+  by a few minutes. Database schema v8.
 
 ## [1.2.0] - 2026-11-19
 

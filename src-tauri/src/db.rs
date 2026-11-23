@@ -14,6 +14,10 @@ pub const DAY_FMT: &str = "%Y-%m-%d";
 
 pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 300;
 
+/// The newest schema version `migrate` produces.
+#[cfg(test)]
+pub const SCHEMA_VERSION: i64 = 8;
+
 pub fn fmt_time(t: NaiveDateTime) -> String {
     t.format(TIME_FMT).to_string()
 }
@@ -240,6 +244,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                  synced_version INTEGER NOT NULL DEFAULT 0
              );
              PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 8 {
+        // Cross-device limits (#70): `device` counts this device's usage, `all`
+        // every synced device's.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE usage_limits ADD COLUMN reach TEXT NOT NULL DEFAULT 'device';
+             PRAGMA user_version = 8;
              COMMIT;",
         )?;
     }
@@ -960,7 +975,7 @@ mod tests {
             )
             .unwrap();
         println!("schema v{v}: {rows} usage rows (before {before}), {with_ids} with ids, {pending} to upload");
-        assert_eq!((v, rows, with_ids), (7, before, before));
+        assert_eq!((v, rows, with_ids), (SCHEMA_VERSION, before, before));
     }
 
     #[test]
@@ -984,7 +999,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, SCHEMA_VERSION);
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM usage_sessions WHERE uuid IS NOT NULL",
@@ -1038,7 +1053,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, SCHEMA_VERSION);
         let profiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
             .unwrap();

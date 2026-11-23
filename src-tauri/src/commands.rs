@@ -737,6 +737,7 @@ pub fn get_limits(state: State<'_, AppState>) -> CmdResult<Vec<LimitStatus>> {
 
 /// Creates or updates the limit for an app or website.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn set_limit(
     state: State<'_, AppState>,
     target_type: String,
@@ -745,7 +746,12 @@ pub fn set_limit(
     warn_pct: i64,
     action: String,
     enabled: bool,
+    reach: Option<String>,
 ) -> CmdResult<()> {
+    let reach = reach.unwrap_or_else(|| "device".into());
+    if reach != "device" && reach != "all" {
+        return Err("A limit applies to this device or all devices".into());
+    }
     if !crate::limits::ACTIONS.contains(&action.as_str()) {
         return Err(format!("unknown limit action: {action}"));
     }
@@ -760,12 +766,13 @@ pub fn set_limit(
     }
     let conn = conn!(state);
     conn.execute(
-        "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled, reach)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(target_type, target_id) DO UPDATE SET
            daily_limit_secs = excluded.daily_limit_secs, warn_pct = excluded.warn_pct,
-           block = excluded.block, action = excluded.action, enabled = excluded.enabled",
-        params![target_type, target_id, daily_limit_secs, warn_pct, action != "notify", action, enabled],
+           block = excluded.block, action = excluded.action, enabled = excluded.enabled,
+           reach = excluded.reach",
+        params![target_type, target_id, daily_limit_secs, warn_pct, action != "notify", action, enabled, reach],
     )
     .map_err(err)?;
     let id: i64 = conn

@@ -197,6 +197,37 @@ pub const STUDY_DOMAINS: &[&str] = &[
     "scholar.google.com",
 ];
 
+/// Phone apps that are the same service as a website, for limits that apply
+/// to all devices (#70): a youtube.com limit also counts the YouTube app.
+pub const APP_SITES: &[(&str, &str)] = &[
+    ("com.google.android.youtube", "youtube.com"),
+    ("com.instagram.android", "instagram.com"),
+    ("com.zhiliaoapp.musically", "tiktok.com"),
+    ("com.ss.android.ugc.trill", "tiktok.com"),
+    ("com.twitter.android", "x.com"),
+    ("com.twitter.android", "twitter.com"),
+    ("com.reddit.frontpage", "reddit.com"),
+    ("com.facebook.katana", "facebook.com"),
+    ("com.netflix.mediaclient", "netflix.com"),
+    ("tv.twitch.android.app", "twitch.tv"),
+    ("com.snapchat.android", "snapchat.com"),
+    ("com.pinterest", "pinterest.com"),
+    ("com.linkedin.android", "linkedin.com"),
+    ("com.spotify.music", "spotify.com"),
+    ("com.whatsapp", "whatsapp.com"),
+    ("com.discord", "discord.com"),
+];
+
+/// Phone apps for a website limit's domain.
+pub fn apps_for_site(domain: &str) -> Vec<&'static str> {
+    let d = domain.trim_start_matches("www.").to_ascii_lowercase();
+    APP_SITES
+        .iter()
+        .filter(|(_, site)| *site == d || site.ends_with(&format!(".{d}")))
+        .map(|(pkg, _)| *pkg)
+        .collect()
+}
+
 /// Categories for common Android apps, by package name (lower case).
 fn android_category(pkg: &str) -> Option<&'static str> {
     if !pkg.contains('.') || pkg.ends_with(".exe") || pkg.contains(['\\', '/']) {

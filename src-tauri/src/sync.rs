@@ -559,7 +559,7 @@ fn collect_pending(
 
     let mut stmt = conn.prepare(
         "SELECT l.uuid, l.version, l.hlc, l.target_type, a.app_key, a.exe_name, COALESCE(a.exe_path, ''),
-                a.display_name, w.domain, l.daily_limit_secs, l.warn_pct, l.action, l.enabled
+                a.display_name, w.domain, l.daily_limit_secs, l.warn_pct, l.action, l.enabled, l.reach
          FROM usage_limits l
          LEFT JOIN applications a ON l.target_type = 'app' AND a.id = l.target_id
          LEFT JOIN websites w ON l.target_type = 'website' AND w.id = l.target_id
@@ -572,7 +572,8 @@ fn collect_pending(
             r.get::<_, Option<String>>(2)?,
             json!({ "targetType": s(r, 3)?, "appKey": s(r, 4)?, "exe": s(r, 5)?, "path": s(r, 6)?,
                     "name": s(r, 7)?, "domain": s(r, 8)?, "dailyLimitSecs": r.get::<_, i64>(9)?,
-                    "warnPct": r.get::<_, i64>(10)?, "action": s(r, 11)?, "enabled": r.get::<_, i64>(12)? != 0 }),
+                    "warnPct": r.get::<_, i64>(10)?, "action": s(r, 11)?, "enabled": r.get::<_, i64>(12)? != 0,
+                    "reach": s(r, 13)? }),
         ))
     })?;
     for row in rows {
@@ -983,12 +984,13 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
             };
             conn.execute(
                 "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled,
-                     uuid, device_id, version, synced_version, hlc)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
+                     uuid, device_id, version, synced_version, hlc, reach)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12)
                  ON CONFLICT(uuid) DO UPDATE SET target_type = excluded.target_type, target_id = excluded.target_id,
                      daily_limit_secs = excluded.daily_limit_secs, warn_pct = excluded.warn_pct, block = excluded.block,
                      action = excluded.action, enabled = excluded.enabled, device_id = excluded.device_id,
-                     version = excluded.version, synced_version = excluded.synced_version, hlc = excluded.hlc",
+                     version = excluded.version, synced_version = excluded.synced_version, hlc = excluded.hlc,
+                     reach = excluded.reach",
                 params![
                     tt,
                     target,
@@ -1000,7 +1002,8 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                     env.id,
                     dev,
                     v,
-                    env.hlc
+                    env.hlc,
+                    if str_of(b, "reach") == "all" { "all" } else { "device" }
                 ],
             )?;
         }
@@ -2378,6 +2381,48 @@ mod tests {
             .unwrap()
             .iter()
             .any(|d| d.name == "Laptop" && d.sync_disabled));
+    }
+
+    #[test]
+    fn a_limit_for_all_devices_counts_every_devices_usage() {
+        let (mut a, mut b) = pair();
+        // A: 1-hour youtube.com limit across devices; 35 min on YouTube in the browser.
+        let yt = db::get_or_create_website(&a.conn, "youtube.com", at((8, 0))).unwrap();
+        a.conn
+            .execute(
+                "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action, reach)
+                 VALUES ('website', ?1, 3600, 'block', 'all')",
+                params![yt],
+            )
+            .unwrap();
+        let w = db::insert_website_session(&a.conn, yt, "chrome", at((9, 0))).unwrap();
+        db::update_span(&a.conn, db::SpanKind::Website, w, at((9, 0)), at((9, 35))).unwrap();
+        // B (a phone): 25 min in the YouTube app.
+        b.use_app("com.google.android.youtube", (10, 0), (10, 25));
+        a.sync();
+        b.sync();
+        a.sync();
+
+        for (name, d) in [("A", &a), ("B", &b)] {
+            let l = &crate::limits::current_status(&d.conn, at((11, 0))).unwrap()[0];
+            assert_eq!(l.reach, "all", "{name}: the setting synced");
+            assert_eq!(l.used_secs, 60 * 60, "{name}: 35 + 25 minutes");
+            assert!(l.exceeded(), "{name}");
+        }
+        let la = &crate::limits::current_status(&a.conn, at((11, 0))).unwrap()[0];
+        assert_eq!(
+            la.others_secs,
+            25 * 60,
+            "A sees how much came from other devices"
+        );
+
+        // Back to this device only: B's usage no longer counts on A.
+        thread::sleep(Duration::from_millis(5));
+        a.conn
+            .execute("UPDATE usage_limits SET reach = 'device'", [])
+            .unwrap();
+        let la = &crate::limits::current_status(&a.conn, at((11, 0))).unwrap()[0];
+        assert_eq!((la.used_secs, la.others_secs), (35 * 60, 0));
     }
 
     #[test]

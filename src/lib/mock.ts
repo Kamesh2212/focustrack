@@ -61,9 +61,9 @@ const SITES: [number, string, number, number][] = [
 ];
 
 let limits: LimitStatus[] = [
-  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", key: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, action: "block", enabled: true, usedSecs: 3010, extraSecs: 0, overridesUsed: 0, path: "", scope: null },
-  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", key: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, action: "notify", enabled: true, usedSecs: 1950, extraSecs: 0, overridesUsed: 0, path: "", scope: null },
-  { id: 3, targetType: "app", targetId: 6, name: "Steam", key: "launcher.exe", color: "#8b5cf6", dailyLimitSecs: 2700, warnPct: 80, action: "warn_then_block", enabled: true, usedSecs: 2400, extraSecs: 0, overridesUsed: 0, path: "C:\\Program Files\\HoYoPlay\\launcher.exe", scope: "c:\\program files\\hoyoplay\\" },
+  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", key: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, action: "block", enabled: true, usedSecs: 3010, extraSecs: 0, overridesUsed: 0, path: "", scope: null, reach: "all", othersSecs: 1240 },
+  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", key: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, action: "notify", enabled: true, usedSecs: 1950, extraSecs: 0, overridesUsed: 0, path: "", scope: null, reach: "device", othersSecs: 0 },
+  { id: 3, targetType: "app", targetId: 6, name: "Steam", key: "launcher.exe", color: "#8b5cf6", dailyLimitSecs: 2700, warnPct: 80, action: "warn_then_block", enabled: true, usedSecs: 2400, extraSecs: 0, overridesUsed: 0, path: "C:\\Program Files\\HoYoPlay\\launcher.exe", scope: "c:\\program files\\hoyoplay\\", reach: "device", othersSecs: 0 },
 ];
 let nextLimitId = 4;
 
@@ -456,8 +456,8 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
           l.targetType === "app"
             ? APPS.find((x) => x[0] === l.targetId)?.[1] ?? "App"
             : SITES.find((x) => x[0] === l.targetId)?.[1] ?? "site";
-        if (existing) Object.assign(existing, l);
-        else limits.push({ ...l, id: nextLimitId++, name, color: "#6366f1", usedSecs: 600 });
+        if (existing) Object.assign(existing, l, l.reach === "all" ? {} : { othersSecs: 0 });
+        else limits.push({ ...l, id: nextLimitId++, name, color: "#6366f1", usedSecs: 600, othersSecs: l.reach === "all" ? 240 : 0 });
         return null;
       }
       case "delete_limit":
