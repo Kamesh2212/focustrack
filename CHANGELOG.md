@@ -19,6 +19,9 @@ All notable changes to this project are documented here. The format follows
   one; a website limit then also counts the site's phone app (youtube.com counts the YouTube app). The limits
   list shows how much came from other devices. Other devices' time arrives when they sync, so blocking can lag
   by a few minutes. Database schema v8.
+- **Blocking profiles and categories sync** (#62): profiles you create, edit or delete, and the category you
+  pick for an app or website, now sync to all your devices. If two devices edit the same profile while
+  offline, the later edit wins; two new profiles with the same name are both kept. Database schema v9.
 
 ## [1.2.0] - 2026-11-19
 

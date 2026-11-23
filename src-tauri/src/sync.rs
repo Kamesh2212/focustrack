@@ -338,6 +338,8 @@ enum Source {
     Table(&'static str),
     Tombstone,
     Device,
+    /// An app's or website's category: (table, key column, key).
+    Category(&'static str, &'static str, String),
 }
 
 struct Outgoing {
@@ -648,6 +650,96 @@ fn collect_pending(
         );
     }
 
+    // Blocking profiles (#62).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, name, mode, categories, apps, sites, unblock_on_breaks, end_early, builtin
+         FROM block_profiles WHERE version > synced_version LIMIT ?1",
+    )?;
+    let list = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Value> {
+        Ok(serde_json::from_str(&s(r, i)?).unwrap_or_else(|_| json!([])))
+    };
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "name": s(r, 3)?, "mode": s(r, 4)?, "categories": list(r, 5)?, "apps": list(r, 6)?,
+                    "sites": list(r, 7)?, "unblockOnBreaks": r.get::<_, i64>(8)? != 0,
+                    "endEarly": s(r, 9)?, "builtin": r.get::<_, i64>(10)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::PROFILE,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("block_profiles"),
+        );
+    }
+
+    // Categories the user picked for apps and websites (#62).
+    let mut stmt = conn.prepare(
+        "SELECT a.app_key, a.cat_version, a.cat_hlc, a.exe_name, COALESCE(a.exe_path, ''), a.display_name, c.name
+         FROM applications a LEFT JOIN categories c ON c.id = a.category_id
+         WHERE a.cat_version > a.cat_synced LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "appKey": s(r, 0)?, "exe": s(r, 3)?, "path": s(r, 4)?, "name": s(r, 5)?,
+                    "category": r.get::<_, Option<String>>(6)? }),
+        ))
+    })?;
+    for row in rows {
+        let (key, v, h, body) = row?;
+        seal(
+            &mut out,
+            focustrack_sync_proto::name_id("app_category", &key),
+            kind::APP_CATEGORY,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Category("applications", "app_key", key),
+        );
+    }
+    let mut stmt = conn.prepare(
+        "SELECT w.domain, w.cat_version, w.cat_hlc, c.name
+         FROM websites w LEFT JOIN categories c ON c.id = w.category_id
+         WHERE w.cat_version > w.cat_synced LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "domain": s(r, 0)?, "category": r.get::<_, Option<String>>(3)? }),
+        ))
+    })?;
+    for row in rows {
+        let (domain, v, h, body) = row?;
+        seal(
+            &mut out,
+            focustrack_sync_proto::name_id("site_category", &domain.to_ascii_lowercase()),
+            kind::SITE_CATEGORY,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Category("websites", "domain", domain),
+        );
+    }
+
     let mut stmt = conn.prepare(
         "SELECT uuid, kind, day, hlc, version FROM sync_tombstones WHERE synced = 0 LIMIT ?1",
     )?;
@@ -659,6 +751,7 @@ fn collect_pending(
         let k: &'static str = match k.as_str() {
             "limit" => kind::LIMIT,
             "goal" => kind::GOAL,
+            "profile" => kind::PROFILE,
             _ => kind::GOAL_CHECK,
         };
         seal(
@@ -688,7 +781,7 @@ fn mark_synced(
         let Some(&v) = acked.get(&o.env.id) else {
             continue;
         };
-        match o.source {
+        match &o.source {
             Source::Table(t) => {
                 conn.execute(
                     &format!("UPDATE {t} SET synced_version = ?2 WHERE uuid = ?1 AND version = ?2"),
@@ -699,6 +792,14 @@ fn mark_synced(
                 conn.execute(
                     "UPDATE sync_tombstones SET synced = 1 WHERE uuid = ?1 AND version = ?2",
                     params![o.env.id, v],
+                )?;
+            }
+            Source::Category(t, col, key) => {
+                conn.execute(
+                    &format!(
+                        "UPDATE {t} SET cat_synced = ?2 WHERE {col} = ?1 AND cat_version = ?2"
+                    ),
+                    params![key, v],
                 )?;
             }
             Source::Device => {
@@ -771,6 +872,7 @@ fn table_for(k: &str) -> Option<&'static str> {
         kind::LIMIT => "usage_limits",
         kind::GOAL => "goals",
         kind::GOAL_CHECK => "goal_checks",
+        kind::PROFILE => "block_profiles",
         _ => return None,
     })
 }
@@ -872,6 +974,9 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
     }
     if env.kind == kind::DEVICE_CONTROL {
         return apply_control(conn, env, b);
+    }
+    if env.kind == kind::APP_CATEGORY || env.kind == kind::SITE_CATEGORY {
+        return apply_category(conn, env, b);
     }
     let Some(t) = table_for(&env.kind) else {
         return Ok(false); // a newer app's record kind: ignore
@@ -1051,8 +1156,104 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                 params![goal, str_of(b, "day"), env.id, dev, v, env.hlc],
             )?;
         }
+        kind::PROFILE => {
+            let mode = str_of(b, "mode");
+            let base = str_of(b, "name").trim();
+            if !(mode == "block" || mode == "allow_only") || base.is_empty() {
+                return Ok(false);
+            }
+            let end_early = match str_of(b, "endEarly") {
+                e @ ("allow" | "confirm" | "strict") => e,
+                _ => "confirm",
+            };
+            // Two devices made a profile with the same name while offline: keep both.
+            let mut name = base.to_string();
+            let mut n = 2;
+            while conn
+                .query_row(
+                    "SELECT 1 FROM block_profiles WHERE name = ?1 AND uuid IS NOT ?2",
+                    params![name, env.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                name = format!("{base} ({n})");
+                n += 1;
+            }
+            let list = |k: &str| {
+                let v = b
+                    .get(k)
+                    .filter(|v| v.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                v.to_string()
+            };
+            conn.execute(
+                "INSERT INTO block_profiles (name, mode, categories, apps, sites, unblock_on_breaks, end_early, builtin,
+                     uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
+                 ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, mode = excluded.mode,
+                     categories = excluded.categories, apps = excluded.apps, sites = excluded.sites,
+                     unblock_on_breaks = excluded.unblock_on_breaks, end_early = excluded.end_early,
+                     device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc",
+                params![name, mode, list("categories"), list("apps"), list("sites"), bool_of(b, "unblockOnBreaks"),
+                        end_early, bool_of(b, "builtin"), env.id, dev, v, env.hlc],
+            )?;
+        }
         _ => return Ok(false),
     }
+    Ok(true)
+}
+
+/// Another device changed the category of an app or website (#62).
+fn apply_category(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    let app = env.kind == kind::APP_CATEGORY;
+    let (table, col, key) = if app {
+        ("applications", "app_key", str_of(b, "appKey"))
+    } else {
+        ("websites", "domain", str_of(b, "domain"))
+    };
+    if key.is_empty() {
+        return Ok(false);
+    }
+    let local: Option<Option<String>> = conn
+        .query_row(
+            &format!("SELECT cat_hlc FROM {table} WHERE {col} = ?1"),
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(h) = &local {
+        if !hlc::newer(env.hlc.as_deref().unwrap_or(""), h.as_deref().unwrap_or("")) {
+            return Ok(false);
+        }
+    }
+    let category: Option<i64> = match opt_str(b, "category") {
+        Some(name) => match conn
+            .query_row(
+                "SELECT id FROM categories WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?
+        {
+            Some(id) => Some(id),
+            None => return Ok(false), // a category this version doesn't have
+        },
+        None => None,
+    };
+    let id = if app {
+        let name = str_of(b, "name").to_string();
+        db::get_or_create_app(conn, str_of(b, "exe"), str_of(b, "path"), || name, now())?.0
+    } else {
+        db::get_or_create_website(conn, key, now())?
+    };
+    conn.execute(
+        &format!("UPDATE {table} SET category_id = ?1, cat_hlc = ?2, cat_version = ?3, cat_synced = ?3 WHERE id = ?4"),
+        params![category, env.hlc, env.version, id],
+    )?;
     Ok(true)
 }
 
@@ -1309,8 +1510,15 @@ fn reset_for_account(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    // Untouched built-in profiles (the oldest clock) are the same everywhere.
     for t in db::SHARED_TABLES {
-        conn.execute(&format!("UPDATE {t} SET synced_version = 0"), [])?;
+        conn.execute(
+            &format!("UPDATE {t} SET synced_version = 0 WHERE hlc NOT LIKE '0:0:%'"),
+            [],
+        )?;
+    }
+    for t in ["applications", "websites"] {
+        conn.execute(&format!("UPDATE {t} SET cat_synced = 0"), [])?;
     }
     conn.execute("DELETE FROM sync_tombstones", [])?;
     for k in ["sync_cursor", "device_record_synced", "sync_last"] {
@@ -2423,6 +2631,157 @@ mod tests {
             .unwrap();
         let la = &crate::limits::current_status(&a.conn, at((11, 0))).unwrap()[0];
         assert_eq!((la.used_secs, la.others_secs), (35 * 60, 0));
+    }
+
+    fn profile(name: &str, sites: &[&str]) -> crate::profiles::Profile {
+        crate::profiles::Profile {
+            id: None,
+            name: name.into(),
+            mode: "block".into(),
+            categories: vec!["Gaming".into()],
+            apps: vec![],
+            sites: sites.iter().map(|s| s.to_string()).collect(),
+            unblock_on_breaks: false,
+            end_early: "confirm".into(),
+            builtin: false,
+        }
+    }
+
+    fn profile_sites(d: &Device, name: &str) -> String {
+        d.conn
+            .query_row(
+                "SELECT sites FROM block_profiles WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn category_of(d: &Device, sql: &str) -> Option<String> {
+        d.conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn profiles_and_categories_sync_both_ways() {
+        let (mut a, mut b) = pair();
+        // Untouched built-in profiles aren't pushed, and never duplicate.
+        assert_eq!(
+            a.count("SELECT COUNT(*) FROM block_profiles WHERE version > synced_version"),
+            0
+        );
+
+        // A: a new profile, an app and a website put in other categories.
+        crate::profiles::save(&a.conn, &profile("Exams", &["reddit.com"])).unwrap();
+        a.use_app("Discord.exe", (9, 0), (9, 10));
+        a.conn
+            .execute(
+                "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Gaming')
+                 WHERE exe_name = 'Discord.exe'",
+                [],
+            )
+            .unwrap();
+        let w = db::get_or_create_website(&a.conn, "news.ycombinator.com", at((9, 0))).unwrap();
+        a.conn
+            .execute(
+                "UPDATE websites SET category_id = (SELECT id FROM categories WHERE name = 'Entertainment') WHERE id = ?1",
+                params![w],
+            )
+            .unwrap();
+        a.sync();
+        b.sync();
+        assert_eq!(profile_sites(&b, "Exams"), r#"["reddit.com"]"#);
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles"),
+            5,
+            "4 built-in + Exams"
+        );
+        let app_cat = "SELECT c.name FROM applications a JOIN categories c ON c.id = a.category_id
+                       WHERE a.exe_name = 'Discord.exe'";
+        let site_cat = "SELECT c.name FROM websites w JOIN categories c ON c.id = w.category_id
+                        WHERE w.domain = 'news.ycombinator.com'";
+        assert_eq!(category_of(&b, app_cat).as_deref(), Some("Gaming"));
+        assert_eq!(category_of(&b, site_cat).as_deref(), Some("Entertainment"));
+        // Applying didn't make B push the same changes back.
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM applications WHERE cat_version > cat_synced"),
+            0
+        );
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles WHERE version > synced_version"),
+            0
+        );
+
+        // B: edits a built-in profile and moves the app again; A gets both.
+        thread::sleep(Duration::from_millis(5));
+        b.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"x.com\"]' WHERE name = 'Study Mode'",
+                [],
+            )
+            .unwrap();
+        b.conn
+            .execute(
+                "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Communication')
+                 WHERE exe_name = 'Discord.exe'",
+                [],
+            )
+            .unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(profile_sites(&a, "Study Mode"), r#"["x.com"]"#);
+        assert_eq!(category_of(&a, app_cat).as_deref(), Some("Communication"));
+
+        // Deleting a profile on A deletes it on B.
+        let id: i64 = a
+            .conn
+            .query_row(
+                "SELECT id FROM block_profiles WHERE name = 'Exams'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::profiles::delete(&a.conn, id).unwrap();
+        a.sync();
+        b.sync();
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles WHERE name = 'Exams'"),
+            0
+        );
+    }
+
+    #[test]
+    fn offline_edits_to_profiles_resolve_without_losing_either() {
+        let (mut a, mut b) = pair();
+        // Both edit the same profile while offline: the later edit wins on both.
+        a.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"a.com\"]' WHERE name = 'Work Mode'",
+                [],
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+        b.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"b.com\"]' WHERE name = 'Work Mode'",
+                [],
+            )
+            .unwrap();
+        // Both make a profile with the same name: both are kept.
+        crate::profiles::save(&a.conn, &profile("Exams", &["a.com"])).unwrap();
+        crate::profiles::save(&b.conn, &profile("Exams", &["b.com"])).unwrap();
+        a.sync();
+        b.sync();
+        a.sync();
+        for (n, d) in [("A", &a), ("B", &b)] {
+            assert_eq!(profile_sites(d, "Work Mode"), r#"["b.com"]"#, "{n}");
+            assert_eq!(
+                d.count("SELECT COUNT(*) FROM block_profiles WHERE name LIKE 'Exams%'"),
+                2,
+                "{n}"
+            );
+        }
+        assert_eq!(profile_sites(&a, "Exams (2)"), r#"["b.com"]"#);
+        assert_eq!(profile_sites(&b, "Exams (2)"), r#"["a.com"]"#);
     }
 
     #[test]

@@ -458,7 +458,7 @@ export function SyncSettings() {
               <div>
                 <b>End-to-end encrypted.</b> Your devices encrypt everything before it leaves this computer; the server
                 can't read it. Synced: app names, website domains (never full addresses), times and durations, focus
-                sessions, limits and goals. Never: keystrokes, window contents, notes or private browsing.
+                sessions, limits, goals, blocking profiles and the categories you pick. Never: keystrokes, window contents, notes or private browsing.
               </div>
             </div>
           </div>
