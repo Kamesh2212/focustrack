@@ -1426,3 +1426,57 @@ pub async fn import_phone_usage(
     .await
     .map_err(err)?
 }
+
+// ------------------------------------------------------- cloud data (#67)
+
+/// Deletes synced history everywhere: all (`before` = null) or before a day,
+/// for all devices or one. Returns how many records the server removed.
+#[tauri::command]
+pub async fn sync_delete_history(
+    state: State<'_, AppState>,
+    before: Option<String>,
+    device: Option<String>,
+) -> CmdResult<u64> {
+    with_sync(&state, move |h, c| {
+        crate::sync::delete_history(h, c, before.as_deref(), device.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_delete_account(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    with_sync(&state, move |h, c| {
+        crate::sync::delete_account(h, c, &password)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_retention(state: State<'_, AppState>) -> CmdResult<Option<u32>> {
+    with_sync(&state, crate::sync::retention).await
+}
+
+#[tauri::command]
+pub async fn sync_set_retention(
+    state: State<'_, AppState>,
+    days: Option<u32>,
+) -> CmdResult<Option<u32>> {
+    with_sync(&state, move |h, c| crate::sync::set_retention(h, c, days)).await
+}
+
+/// Exports everything in the account (decrypted) to a JSON file in Downloads.
+/// Returns the file's path.
+#[tauri::command]
+pub async fn sync_export(app: AppHandle, state: State<'_, AppState>) -> CmdResult<String> {
+    let dir = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| state.data_dir.clone());
+    let file = dir.join(format!(
+        "FocusTrack-export-{}.json",
+        Local::now().format("%Y-%m-%d-%H%M")
+    ));
+    let out = file.clone();
+    with_sync(&state, move |h, c| crate::sync::export(h, c, &out)).await?;
+    Ok(file.to_string_lossy().into_owned())
+}

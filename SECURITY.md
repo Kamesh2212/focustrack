@@ -10,6 +10,8 @@ affected. We aim to reply within a week and will credit you in the release notes
 
 | Version | Supported |
 |---|---|
+| 1.2.x | ✅ |
+| 1.1.x | ✅ |
 | 1.0.x | ✅ |
 
 ## Security model
@@ -18,8 +20,17 @@ FocusTrack is a local, offline-first app.
 
 - **Data at rest:** a SQLite database in `%APPDATA%\com.focustrack.app\`, readable by your Windows user
   account. It is not encrypted.
-- **Network:** no internet access and no telemetry. The only listener is the extension API on
-  `127.0.0.1:17865`.
+- **Network:** no telemetry. The only listener is the extension API on `127.0.0.1:17865`. Without an
+  account FocusTrack never connects to the internet.
+- **Multi-device sync (optional, preview):** off until you sign in. Devices encrypt every record on the
+  device (XChaCha20-Poly1305) with an account key that the server never sees; your password unlocks that key
+  on each device (Argon2id) and is never sent. The server stores ciphertext plus the metadata it needs:
+  record IDs, kinds, which device wrote them, the calendar day, and your email. Device sign-in secrets are
+  kept with Windows DPAPI. Sync uses https, except to this computer or your home network (a self-hosted
+  server). Design: [docs/SYNC-DESIGN.md](docs/SYNC-DESIGN.md).
+- **Your synced data** (Settings → Account & Sync): export it (decrypted JSON), set how long the server keeps
+  history, delete history (all, before a date, or one device's) from the server and every device, or delete
+  the account and everything in it.
 - **Extension API:** accepts requests only from browser-extension origins with an `X-FocusTrack` header and a
   local `Host`, so ordinary websites can't use it (including through DNS rebinding).
 - **What's collected:** foreground app, active website domain (with the extension), timings and idle state.

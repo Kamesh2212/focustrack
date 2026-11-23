@@ -406,6 +406,59 @@ fn deleting_history_and_the_account() {
 }
 
 #[test]
+fn retention_removes_old_history_and_keeps_settings() {
+    let base = start();
+    let pc = signup(&base, "r@example.com", "pw-one-two-three");
+    assert_eq!(
+        pc.client.account().unwrap().retention_days,
+        None,
+        "forever by default"
+    );
+    let old = day_string(chrono_today() - 100);
+    let recent = day_string(chrono_today() - 10);
+    let mut clock = hlc::Clock::new(&pc.id);
+    pc.client
+        .push(&[
+            usage(&pc, &new_id(), 1, &old, 1),
+            usage(&pc, &new_id(), 1, &recent, 2),
+            Envelope::seal(
+                &pc.key,
+                &new_id(),
+                kind::LIMIT,
+                &pc.id,
+                &old,
+                1,
+                Some(clock.tick(1).to_string()),
+                false,
+                &json!({}),
+            ),
+        ])
+        .unwrap();
+    // Only the offered periods are accepted.
+    assert_eq!(
+        pc.client.set_retention(Some(12)).err().unwrap().status(),
+        Some(400)
+    );
+    assert_eq!(
+        pc.client.set_retention(Some(90)).unwrap().retention_days,
+        Some(90)
+    );
+    let phone = signin(&base, "r@example.com", "pw-one-two-three", "android");
+    let kinds: Vec<String> = pull_all(&phone)
+        .into_iter()
+        .map(|(e, _)| format!("{}:{}", e.kind, e.day))
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        2,
+        "the 100-day-old usage is gone, the limit stays: {kinds:?}"
+    );
+    assert!(kinds.iter().any(|k| k.starts_with("limit:")));
+    // Back to forever.
+    assert_eq!(pc.client.set_retention(None).unwrap().retention_days, None);
+}
+
+#[test]
 fn unknown_emails_get_stable_fake_parameters() {
     let base = start();
     let c = Client::new(&base);

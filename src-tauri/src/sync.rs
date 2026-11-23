@@ -807,6 +807,12 @@ fn app_id(conn: &Connection, b: &Value) -> rusqlite::Result<i64> {
 
 /// Applies one record; returns whether anything changed.
 fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    if env.kind == kind::PURGE {
+        // Another device deleted history; remove our copies too (#67).
+        let device = opt_str(b, "device");
+        purge_local(conn, str_of(b, "until"), device.as_deref())?;
+        return Ok(true);
+    }
     if env.kind == kind::DEVICE {
         conn.execute(
             "INSERT INTO devices (id, name, platform, app_version, last_seen) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1478,6 +1484,153 @@ pub fn set_enabled(handle: &SyncHandle, conn: &Connection, on: bool) -> Result<(
     Ok(())
 }
 
+// ------------------------------------------------------- cloud data (#67)
+
+/// Deletes usage history (all devices' rows, or one device's) recorded before
+/// `until` (`YYYY-MM-DD HH:MM:SS`) from this device's database.
+fn purge_local(conn: &Connection, until: &str, device: Option<&str>) -> rusqlite::Result<usize> {
+    if db::parse_time(until).is_none() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for t in db::OWNED_TABLES {
+        n += conn.execute(
+            &format!("DELETE FROM {t} WHERE start_time < ?1 AND (?2 IS NULL OR device_id = ?2)"),
+            params![until, device],
+        )?;
+    }
+    Ok(n)
+}
+
+fn account_key(handle: &SyncHandle) -> Result<AccountKey, String> {
+    handle
+        .secrets
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().map(|s| s.account_key.clone()))
+        .ok_or_else(|| "Sign in first".to_string())
+}
+
+/// Deletes synced history from the server and from every device: everything
+/// (`before` = None) or what was recorded before a day, for all devices or
+/// one. Returns how many records the server removed.
+pub fn delete_history(
+    handle: &SyncHandle,
+    conn: &Connection,
+    before: Option<&str>,
+    device: Option<&str>,
+) -> Result<u64, String> {
+    let key = account_key(handle)?;
+    let before_day = match before {
+        Some(d) => Some(chrono::NaiveDate::parse_from_str(d, db::DAY_FMT).map_err(|_| "Bad date")?),
+        None => None,
+    };
+    let now = now();
+    let until = before_day
+        .map(|d| db::fmt_time(d.and_time(chrono::NaiveTime::MIN)))
+        .unwrap_or_else(|| db::fmt_time(now));
+    // The server works in whole days: "everything" means up to and including today.
+    let server_before = before_day
+        .unwrap_or(now.date() + chrono::Duration::days(1))
+        .format(db::DAY_FMT)
+        .to_string();
+    let me = device_id(conn).map_err(|e| e.to_string())?;
+    let hlc = format!("{}:0:{me}", chrono::Utc::now().timestamp_millis());
+    let purge = Envelope::seal(
+        &key,
+        &focustrack_sync_proto::new_id(),
+        kind::PURGE,
+        &me,
+        &today(),
+        1,
+        Some(hlc),
+        false,
+        &json!({ "until": until, "device": device }),
+    );
+    // Tell the other devices first, then clear the server, then this device.
+    call(handle, conn, |c| c.push(std::slice::from_ref(&purge))).map_err(|e| e.to_string())?;
+    let deleted = call(handle, conn, |c| c.delete_data(&server_before, device))
+        .map_err(|e| e.to_string())?
+        .deleted;
+    db::set_setting(conn, "sync_applying", "1").map_err(|e| e.to_string())?;
+    let local = purge_local(conn, &until, device);
+    db::set_setting(conn, "sync_applying", "0").map_err(|e| e.to_string())?;
+    local.map_err(|e| e.to_string())?;
+    Ok(deleted)
+}
+
+/// Deletes the account and all its cloud data, then signs this device out
+/// (its own local history stays). Needs the password again.
+pub fn delete_account(
+    handle: &SyncHandle,
+    conn: &Connection,
+    password: &str,
+) -> Result<(), String> {
+    let email = setting(conn, "sync_email").ok_or("Sign in first")?;
+    // Make sure we hold a fresh access token, so a 401 below means "wrong password".
+    call(handle, conn, |c| c.account()).map_err(|e| e.to_string())?;
+    let mut c = client_for(conn).map_err(|e| e.to_string())?;
+    c.set_access_token(handle.access.lock().ok().and_then(|a| a.clone()));
+    let params = c.auth_params(&email).map_err(|e| e.to_string())?;
+    let master =
+        focustrack_sync_proto::crypto::MasterKey::derive(password, &params.salt, &params.kdf)
+            .map_err(|e| e.to_string())?;
+    match c.delete_account(&master.auth_key()) {
+        Ok(_) => {}
+        Err(e) if e.status() == Some(401) => return Err("Wrong password".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+    sign_out(handle, conn)
+}
+
+/// Days of history the server keeps (None = forever).
+pub fn retention(handle: &SyncHandle, conn: &Connection) -> Result<Option<u32>, String> {
+    call(handle, conn, |c| c.account())
+        .map(|a| a.retention_days)
+        .map_err(|e| e.to_string())
+}
+
+pub fn set_retention(
+    handle: &SyncHandle,
+    conn: &Connection,
+    days: Option<u32>,
+) -> Result<Option<u32>, String> {
+    call(handle, conn, |c| c.set_retention(days))
+        .map(|a| a.retention_days)
+        .map_err(|e| e.to_string())
+}
+
+/// Downloads everything stored in the account, decrypts it and writes it as
+/// JSON to `path`. Returns how many records were written.
+pub fn export(handle: &SyncHandle, conn: &Connection, path: &Path) -> Result<usize, String> {
+    let key = account_key(handle)?;
+    let mut since = 0;
+    let mut records = Vec::new();
+    loop {
+        let page = call(handle, conn, |c| c.pull_all(since, BATCH)).map_err(|e| e.to_string())?;
+        for env in page.records {
+            let body: Value = env.open(&key).unwrap_or(Value::Null);
+            records.push(json!({
+                "id": env.id, "kind": env.kind, "device": env.device, "day": env.day,
+                "version": env.version, "deleted": env.deleted, "data": body,
+            }));
+        }
+        since = page.cursor;
+        if !page.more {
+            break;
+        }
+    }
+    let doc = json!({
+        "app": "FocusTrack",
+        "exported": db::fmt_time(now()),
+        "account": setting(conn, "sync_email"),
+        "records": records,
+    });
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+    Ok(records.len())
+}
+
 pub fn rename_device(handle: &SyncHandle, conn: &Connection, name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 40 {
@@ -1831,6 +1984,128 @@ mod tests {
         ] {
             assert!(check_server(bad).is_err(), "{bad}");
         }
+    }
+
+    fn usage_count(d: &Device) -> i64 {
+        d.count("SELECT COUNT(*) FROM usage_sessions")
+    }
+
+    #[test]
+    fn deleting_all_history_reaches_every_device() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        b.use_app("steam.exe", (9, 0), (9, 10));
+        a.sync();
+        b.sync();
+        a.sync();
+        assert_eq!((usage_count(&a), usage_count(&b)), (2, 2));
+
+        let removed = delete_history(&a.handle, &a.conn, None, None).unwrap();
+        assert_eq!(removed, 2, "both devices' records left the server");
+        assert_eq!(usage_count(&a), 0);
+        b.sync();
+        assert_eq!(usage_count(&b), 0, "B applied the purge");
+        // A new device gets nothing back.
+        let c = device();
+        let url = setting(&a.conn, "sync_server").unwrap();
+        sign_in(
+            &c.handle,
+            &c.conn,
+            &url,
+            "sam@example.com",
+            "a long password",
+            "New",
+        )
+        .unwrap();
+        let mut c = c;
+        c.sync();
+        assert_eq!(usage_count(&c), 0);
+        // Tracking carries on afterwards.
+        b.use_app("steam.exe", (11, 0), (11, 5));
+        b.sync();
+        a.sync();
+        assert_eq!(usage_count(&a), 1);
+    }
+
+    #[test]
+    fn deleting_one_devices_history_or_older_history() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        b.use_app("steam.exe", (9, 0), (9, 10));
+        a.sync();
+        b.sync();
+        a.sync();
+        // Only B's history.
+        delete_history(&a.handle, &a.conn, None, Some(&b.id())).unwrap();
+        assert_eq!(
+            a.count(&format!(
+                "SELECT COUNT(*) FROM usage_sessions WHERE device_id = '{}'",
+                b.id()
+            )),
+            0
+        );
+        assert_eq!(usage_count(&a), 1, "A's own history stays");
+        b.sync();
+        assert_eq!(usage_count(&b), 1, "B keeps only A's session");
+
+        // History before today: nothing recorded today is touched.
+        let today = Local::now().date_naive().format(db::DAY_FMT).to_string();
+        assert_eq!(
+            delete_history(&a.handle, &a.conn, Some(&today), None).unwrap(),
+            0
+        );
+        assert_eq!(usage_count(&a), 1);
+    }
+
+    #[test]
+    fn deleting_the_account_needs_the_password_and_signs_everyone_out() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        a.sync();
+        assert_eq!(
+            delete_account(&a.handle, &a.conn, "wrong").err().unwrap(),
+            "Wrong password"
+        );
+        delete_account(&a.handle, &a.conn, "a long password").unwrap();
+        assert!(!a.handle.signed_in());
+        assert_eq!(usage_count(&a), 1, "local history stays");
+        assert!(matches!(
+            sync_once(&b.handle, &mut b.conn),
+            Err(SyncError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn export_writes_everything_decrypted() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        b.use_app("steam.exe", (9, 0), (9, 10));
+        a.sync();
+        b.sync();
+        let path = a.handle.data_dir.join("export.json");
+        let n = export(&a.handle, &a.conn, &path).unwrap();
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let usage: Vec<&Value> = doc["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "usage")
+            .collect();
+        assert_eq!(usage.len(), 2, "this device's own records too");
+        assert!(usage.iter().any(|r| r["data"]["exe"] == "code.exe"));
+        assert!(n >= 4, "usage plus the two device records");
+    }
+
+    #[test]
+    fn retention_round_trips() {
+        let (a, _b) = pair();
+        assert_eq!(retention(&a.handle, &a.conn).unwrap(), None);
+        assert_eq!(
+            set_retention(&a.handle, &a.conn, Some(365)).unwrap(),
+            Some(365)
+        );
+        assert_eq!(retention(&a.handle, &a.conn).unwrap(), Some(365));
+        assert!(set_retention(&a.handle, &a.conn, Some(3)).is_err());
     }
 
     #[test]

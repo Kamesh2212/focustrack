@@ -135,6 +135,7 @@ let notes: Note[] = [
 let nextNoteId = 4;
 
 let phoneAccess = false;
+let retention: number | null = null;
 
 const sync: SyncStatus = {
   signedIn: false,
@@ -594,6 +595,19 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "sync_remove_device":
         sync.otherDevices = 0;
         return null;
+      case "sync_delete_history":
+        return 42;
+      case "sync_delete_account":
+        if (String(a.password).length < 10) throw new Error("Wrong password");
+        Object.assign(sync, { signedIn: false, enabled: false, email: null, state: "off", otherDevices: 0 });
+        return null;
+      case "sync_retention":
+        return retention;
+      case "sync_set_retention":
+        retention = (a.days as number | null) ?? null;
+        return retention;
+      case "sync_export":
+        return "C:/Users/you/Downloads/FocusTrack-export-2026-11-23-1015.json";
       case "sync_rename_device":
         sync.deviceName = String(a.name);
         return null;

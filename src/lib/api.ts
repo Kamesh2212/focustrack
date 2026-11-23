@@ -112,6 +112,13 @@ export const api = {
   syncDevices: () => call<SyncDevice[]>("sync_devices"),
   syncRemoveDevice: (id: string) => call<void>("sync_remove_device", { id }),
   syncRenameDevice: (name: string) => call<void>("sync_rename_device", { name }),
+  /** Deletes synced history everywhere; `before` = "YYYY-MM-DD" or null for all. Returns records removed. */
+  syncDeleteHistory: (before: string | null, device: string | null) => call<number>("sync_delete_history", { before, device }),
+  syncDeleteAccount: (password: string) => call<void>("sync_delete_account", { password }),
+  syncRetention: () => call<number | null>("sync_retention"),
+  syncSetRetention: (days: number | null) => call<number | null>("sync_set_retention", { days }),
+  /** Writes a decrypted JSON export to Downloads; returns its path. */
+  syncExport: () => call<string>("sync_export"),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

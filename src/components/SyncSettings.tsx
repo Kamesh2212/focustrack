@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Cloud, CloudOff, Copy, KeyRound, Laptop, Loader2, LockKeyhole, RefreshCw, Smartphone } from "lucide-react";
+import { Cloud, CloudOff, Copy, Download, KeyRound, Laptop, Loader2, LockKeyhole, RefreshCw, Smartphone, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import type { SyncDevice, SyncStatus } from "../lib/types";
@@ -10,6 +10,9 @@ const DEFAULT_SERVER = "http://127.0.0.1:8787";
 
 const field =
   "w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900";
+
+/** Same look as `field`, sized by its own width class. */
+const inline = field.replace("w-full ", "");
 
 function since(t: string | null): string {
   if (!t) return "never";
@@ -194,21 +197,189 @@ function Devices({ onError }: { onError: (e: string) => void }) {
               </div>
             </div>
             {!d.current && (
-              <ConfirmButton
-                label="Remove"
-                confirmLabel="Remove device"
-                onConfirm={() =>
-                  api
-                    .syncRemoveDevice(d.id)
-                    .then(reload)
-                    .catch((e) => onError(String(e)))
-                }
-              />
+              <div className="flex flex-wrap gap-2">
+                <ConfirmButton
+                  label="Delete data"
+                  confirmLabel="Delete its history"
+                  onConfirm={() =>
+                    api
+                      .syncDeleteHistory(null, d.id)
+                      .then(reload)
+                      .catch((e) => onError(String(e)))
+                  }
+                />
+                <ConfirmButton
+                  label="Remove"
+                  confirmLabel="Remove device"
+                  onConfirm={() =>
+                    api
+                      .syncRemoveDevice(d.id)
+                      .then(reload)
+                      .catch((e) => onError(String(e)))
+                  }
+                />
+              </div>
             )}
           </li>
         ))}
         {data && data.length === 0 && <li className="px-3 py-2 text-sm text-slate-500">No devices yet.</li>}
       </ul>
+    </div>
+  );
+}
+
+const RETENTION: { days: number | null; label: string }[] = [
+  { days: null, label: "Forever" },
+  { days: 730, label: "2 years" },
+  { days: 365, label: "1 year" },
+  { days: 180, label: "6 months" },
+  { days: 90, label: "3 months" },
+  { days: 30, label: "30 days" },
+];
+
+const DELETE_RANGES: { value: string; label: string; days: number | null }[] = [
+  { value: "all", label: "Everything", days: null },
+  { value: "30", label: "Older than 30 days", days: 30 },
+  { value: "90", label: "Older than 3 months", days: 90 },
+  { value: "365", label: "Older than 1 year", days: 365 },
+];
+
+function daysAgo(n: number): string {
+  const d = new Date(Date.now() - n * 86_400_000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Retention, export, deleting history and the account (#67). */
+function CloudData({ onDone }: { onDone: () => void }) {
+  const retention = useLoad(() => api.syncRetention(), []);
+  const [range, setRange] = useState("all");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (what: string, fn: () => Promise<string | void>) => {
+    setBusy(what);
+    setError(null);
+    setNote(null);
+    try {
+      const msg = await fn();
+      if (msg) setNote(msg);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="space-y-3 border-t border-slate-100 pt-3 text-sm dark:border-slate-800">
+      <div className="font-medium">Your synced data</div>
+      <ErrorNote error={error} />
+      {note && <div className="rounded-lg bg-emerald-50 px-3 py-2 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">{note}</div>}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-md">
+          <div>Keep synced history</div>
+          <div className="text-xs text-slate-500">
+            Older history is deleted from the server automatically. History already on your devices isn&apos;t affected.
+          </div>
+        </div>
+        <select
+          value={retention.data === null ? "" : String(retention.data)}
+          disabled={!!busy || retention.loading}
+          onChange={(e) => {
+            const days = e.target.value === "" ? null : Number(e.target.value);
+            run("retention", async () => {
+              await api.syncSetRetention(days);
+              retention.reload();
+              return days
+                ? `History older than ${RETENTION.find((r) => r.days === days)?.label} is now deleted from the server.`
+                : "Synced history is kept until you delete it.";
+            });
+          }}
+          className={cx(inline, "w-36")}
+          aria-label="Keep synced history"
+        >
+          {RETENTION.map((r) => (
+            <option key={r.label} value={r.days ?? ""}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-md">
+          <div>Export</div>
+          <div className="text-xs text-slate-500">Download everything in your account, decrypted, as a JSON file.</div>
+        </div>
+        <Button disabled={!!busy} onClick={() => run("export", async () => `Saved to ${await api.syncExport()}`)}>
+          {busy === "export" ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Export
+        </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-md">
+          <div>Delete synced history</div>
+          <div className="text-xs text-slate-500">Removes it from the server and from all your devices. Limits, goals and settings stay.</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={range} onChange={(e) => setRange(e.target.value)} className={cx(inline, "w-44")} aria-label="What to delete">
+            {DELETE_RANGES.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
+          </select>
+          <ConfirmButton
+            label="Delete…"
+            confirmLabel="Delete from all devices"
+            onConfirm={() => {
+              const r = DELETE_RANGES.find((x) => x.value === range)!;
+              run("delete", async () => {
+                const n = await api.syncDeleteHistory(r.days === null ? null : daysAgo(r.days), null);
+                onDone();
+                return `Deleted ${n} record${n === 1 ? "" : "s"} from the server. Your other devices remove their copies when they next sync.`;
+              });
+            }}
+          />
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-rose-200 p-3 dark:border-rose-900">
+        <div className="flex items-center gap-2 font-medium text-rose-700 dark:text-rose-300">
+          <Trash2 size={14} /> Delete account
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Deletes your account and everything stored in it, and signs out all your devices. History already on each device
+          stays there until you clear it under Privacy &amp; data.
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+            autoComplete="current-password"
+            className={cx(inline, "w-48")}
+            aria-label="Password to delete the account"
+          />
+          {password && (
+            <ConfirmButton
+              label="Delete account…"
+              confirmLabel="Delete my account"
+              onConfirm={() =>
+                run("account", async () => {
+                  await api.syncDeleteAccount(password);
+                  setPassword("");
+                  onDone();
+                })
+              }
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -309,6 +480,7 @@ export function SyncSettings() {
             )}
           </div>
           <Devices onError={setError} />
+          <CloudData onDone={reload} />
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-sm dark:border-slate-800">
             <span className="max-w-xl text-xs text-slate-500">
               Signing out keeps this device's own history and tracking. Data from your other devices is removed from this

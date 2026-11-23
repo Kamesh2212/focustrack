@@ -9,7 +9,7 @@ pub mod store;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use focustrack_sync_proto::api::*;
 use focustrack_sync_proto::crypto::KdfParams;
@@ -430,6 +430,8 @@ struct PullQuery {
     since: i64,
     limit: Option<usize>,
     days: Option<u32>,
+    /// 1 = include the caller's own records (export).
+    own: Option<u8>,
 }
 
 async fn pull(
@@ -438,6 +440,12 @@ async fn pull(
     Query(q): Query<PullQuery>,
 ) -> ApiResult<PullResponse> {
     let (account, device) = auth(&st, &headers).await?;
+    // Normally a device never gets its own records back; export wants everything.
+    let device = if q.own == Some(1) {
+        String::new()
+    } else {
+        device
+    };
     let limit = q.limit.unwrap_or(MAX_BATCH).clamp(1, MAX_BATCH);
     let min_day = q.days.map(|d| {
         (chrono::Utc::now().date_naive() - chrono::Duration::days(d as i64))
@@ -492,6 +500,52 @@ struct DeleteAccountRequest {
     auth_key: String,
 }
 
+async fn account_info(State(st): State<Shared>, headers: HeaderMap) -> ApiResult<AccountInfo> {
+    let (account, _) = auth(&st, &headers).await?;
+    let retention_days = db(&st, move |c| store::retention(c, &account)).await?;
+    Ok(Json(AccountInfo { retention_days }))
+}
+
+async fn set_retention(
+    State(st): State<Shared>,
+    headers: HeaderMap,
+    Json(req): Json<RetentionRequest>,
+) -> ApiResult<AccountInfo> {
+    let (account, _) = auth(&st, &headers).await?;
+    if req.days.is_some_and(|d| !RETENTION_CHOICES.contains(&d)) {
+        return Err(ApiError::bad("unsupported retention period"));
+    }
+    let days = req.days;
+    db(&st, move |c| {
+        store::set_retention(c, &account, days)?;
+        // Apply right away, not only at the next hourly sweep.
+        store::apply_retention(c, chrono::Utc::now().date_naive())
+    })
+    .await?;
+    Ok(Json(AccountInfo {
+        retention_days: days,
+    }))
+}
+
+/// Applies retention periods every hour.
+fn spawn_retention_sweeper(st: Shared) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            tick.tick().await;
+            match db(&st, |c| {
+                store::apply_retention(c, chrono::Utc::now().date_naive())
+            })
+            .await
+            {
+                Ok(n) if n > 0 => println!("retention: removed {n} old record(s)"),
+                Ok(_) => {}
+                Err(e) => eprintln!("retention sweep failed: {:?}", e),
+            }
+        }
+    });
+}
+
 async fn delete_account(
     State(st): State<Shared>,
     headers: HeaderMap,
@@ -525,6 +579,9 @@ pub fn app(conn: Connection, config: Config) -> Router {
         config,
         limiter: Mutex::new(HashMap::new()),
     });
+    if tokio::runtime::Handle::try_current().is_ok() {
+        spawn_retention_sweeper(state.clone());
+    }
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/auth/params", get(auth_params))
@@ -537,7 +594,8 @@ pub fn app(conn: Connection, config: Config) -> Router {
         .route("/v1/sync/push", post(push))
         .route("/v1/sync/pull", get(pull))
         .route("/v1/data", delete(delete_data))
-        .route("/v1/account", delete(delete_account))
+        .route("/v1/account", get(account_info).delete(delete_account))
+        .route("/v1/account/retention", put(set_retention))
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state)
 }

@@ -63,6 +63,9 @@ Requires Windows 10 or 11 (WebView2 is included in Windows 11 and installed auto
 - The browser extension sends only the active tab's **domain** to FocusTrack on `127.0.0.1`, never to the
   internet. Private windows are never reported.
 - Pause tracking, delete old data, or clear everything from **Settings**.
+- **Sync is optional** and end-to-end encrypted: the server can't read your usage. You can export your synced
+  data, choose how long it's kept, delete it from every device, or delete your account
+  (Settings → Account & Sync).
 - See [SECURITY.md](SECURITY.md) for the security model and known limitations.
 
 ## Build from source

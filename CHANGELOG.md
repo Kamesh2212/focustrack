@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **Your synced data** (Settings → Account & Sync, #67): export everything in your account as decrypted JSON;
+  choose how long the server keeps history (30 days to 2 years, or forever); delete synced history (everything
+  or older than a period) from the server and all your devices; delete one device's history; delete the
+  account (asks for your password).
+- Sync server: retention periods, applied hourly, and an export option to download your own records.
+
 ## [1.2.0] - 2026-11-19
 
 Pre-release for testing. Multi-device sync and the Android app are **previews**: sync needs a FocusTrack sync

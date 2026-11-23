@@ -89,6 +89,13 @@ pub fn open(path: &str) -> rusqlite::Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_records_seq ON records(account, seq);
          CREATE INDEX IF NOT EXISTS idx_records_day ON records(account, day);",
     )?;
+    // Added after the first release: how long to keep history (#67).
+    let has_retention: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('accounts') WHERE name = 'retention_days'")?
+        .exists([])?;
+    if !has_retention {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN retention_days INTEGER;")?;
+    }
     Ok(conn)
 }
 
@@ -507,6 +514,40 @@ pub fn pull(
         )?
     };
     Ok((out, cursor.max(since), more))
+}
+
+/// How many days of history the account keeps (None = forever).
+pub fn retention(conn: &Connection, account: &str) -> rusqlite::Result<Option<u32>> {
+    conn.query_row(
+        "SELECT retention_days FROM accounts WHERE id = ?1",
+        params![account],
+        |r| r.get(0),
+    )
+}
+
+pub fn set_retention(conn: &Connection, account: &str, days: Option<u32>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET retention_days = ?2 WHERE id = ?1",
+        params![account, days],
+    )?;
+    Ok(())
+}
+
+/// Deletes history older than each account's retention period. Returns the
+/// number of records removed. `today` is `YYYY-MM-DD`.
+pub fn apply_retention(conn: &Connection, today: chrono::NaiveDate) -> rusqlite::Result<u64> {
+    let accounts: Vec<(String, u32)> = conn
+        .prepare("SELECT id, retention_days FROM accounts WHERE retention_days IS NOT NULL")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    for (account, days) in accounts {
+        let cutoff = (today - chrono::Duration::days(days as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+        n += delete_before(conn, &account, &cutoff, None)?;
+    }
+    Ok(n)
 }
 
 /// Deletes device-owned history before `before` (shared definitions stay).
