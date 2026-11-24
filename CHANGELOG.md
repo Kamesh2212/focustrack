@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- With Administrator mode on, opening FocusTrack from the Start menu or a shortcut did nothing: the normal copy
+  and the administrator copy each thought the other was FocusTrack and both quit. The hand-over now happens first.
+
 ## [1.2.1] - 2026-11-24
 
 Pre-release for testing. Multi-device sync and the Android app are **previews**. Sync now uses FocusTrack's

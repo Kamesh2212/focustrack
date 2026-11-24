@@ -126,6 +126,15 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Administrator mode is on but this copy isn't elevated (e.g. opened from
+    // the Start menu): hand over to the administrator copy. This must happen
+    // before the single-instance check below: otherwise this copy holds it, the
+    // administrator copy thinks FocusTrack is already open and quits, and
+    // nothing opens at all.
+    #[cfg(desktop)]
+    if profile::name().is_none() && admin::hand_over_if_needed() {
+        std::process::exit(0);
+    }
     let mut builder = tauri::Builder::default();
     // A second launch just focuses the running instance (no double tracking).
     // Development profiles run side by side as separate devices instead.
@@ -146,12 +155,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_focustrack_usage::init())
         .setup(|app| {
-            // Administrator mode is on but this copy isn't elevated (e.g. opened
-            // from the Start menu): hand over to the administrator copy.
-            #[cfg(desktop)]
-            if profile::name().is_none() && admin::hand_over_if_needed() {
-                std::process::exit(0);
-            }
             let data_dir = profile::data_dir(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("focustrack.db");
