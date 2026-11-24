@@ -85,6 +85,7 @@ pub fn get_dashboard(state: State<'_, AppState>, device: Option<String>) -> CmdR
     let week = an::daily_totals(&conn, today - Duration::days(6), today).map_err(err)?;
     let month = an::daily_totals(&conn, today - Duration::days(29), today).map_err(err)?;
     let apps = an::app_usage(&conn, &t, &t).map_err(err)?;
+    let apps = an::combine_apps(&conn, apps, &t, &t).map_err(err)?;
     let sites = an::site_usage(&conn, &t, &t).map_err(err)?;
     let site_secs = an::site_total(&conn, &t, &t).map_err(err)?;
     let categories = an::category_usage(&conn, &t, &t).map_err(err)?;
@@ -132,12 +133,40 @@ pub struct Category {
     pub kind: String,
 }
 
+/// Apps in the range. `combine`: the same app on several platforms is one row,
+/// with each device's part (#63); `device` limits it to some devices.
 #[tauri::command]
-pub fn get_apps(state: State<'_, AppState>, from: String, to: String) -> CmdResult<Vec<AppUsage>> {
+pub fn get_apps(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    combine: Option<bool>,
+    device: Option<String>,
+) -> CmdResult<Vec<AppUsage>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
-    an::app_usage(&conn, &from, &to).map_err(err)
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
+    let apps = an::app_usage(&conn, &from, &to).map_err(err)?;
+    if combine.unwrap_or(false) {
+        an::combine_apps(&conn, apps, &from, &to).map_err(err)
+    } else {
+        Ok(apps)
+    }
+}
+
+/// Screen time per device in the range (for the device filter).
+#[tauri::command]
+pub fn get_devices(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> CmdResult<Vec<an::DeviceTotal>> {
+    an::parse_day(&from)?;
+    an::parse_day(&to)?;
+    let conn = conn!(state);
+    an::device_totals(&conn, &from, &to).map_err(err)
 }
 
 #[tauri::command]
@@ -220,6 +249,8 @@ pub struct Report {
     pub unique_active_secs: i64,
     pub devices: Vec<an::DeviceTotal>,
     pub devices_unique_secs: i64,
+    /// With several devices: each one's numbers side by side (#65).
+    pub comparison: Vec<an::DeviceStats>,
 }
 
 #[tauri::command]
@@ -236,6 +267,12 @@ pub fn get_report(
     let conn = conn!(state);
     let devices = an::device_totals(&conn, &from, &to).map_err(err)?;
     let devices_unique_secs = an::union_secs(&an::active_spans(&conn, &from, &to).map_err(err)?);
+    // Before this report's own device view: it sets one per device.
+    let comparison = if devices.len() > 1 {
+        an::compare_devices(&conn, f, t).map_err(err)?
+    } else {
+        Vec::new()
+    };
     let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
     let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
     let len = (t - f).num_days() + 1;
@@ -245,7 +282,9 @@ pub fn get_report(
     let (prev_active, _) = an::totals(&conn, &an::fmt_day(pf), &an::fmt_day(pt)).map_err(err)?;
     let days = an::daily_totals(&conn, f, t).map_err(err)?;
     let apps = an::app_usage(&conn, &from, &to).map_err(err)?;
+    let apps = an::combine_apps(&conn, apps, &from, &to).map_err(err)?;
     let sites = an::site_usage(&conn, &from, &to).map_err(err)?;
+    let sites = an::sites_by_device(&conn, sites, &from, &to).map_err(err)?;
     let site_secs = an::site_total(&conn, &from, &to).map_err(err)?;
     let categories = an::category_usage(&conn, &from, &to).map_err(err)?;
     let spans = an::active_spans(&conn, &from, &to).map_err(err)?;
@@ -293,6 +332,7 @@ pub fn get_report(
         unique_active_secs: an::union_secs(&spans),
         devices,
         devices_unique_secs,
+        comparison,
     })
 }
 
@@ -462,6 +502,8 @@ pub struct Settings {
     pub theme: String,
     pub data_dir: String,
     pub notifications_enabled: bool,
+    /// A motivational quote when something is blocked (#49).
+    pub show_quotes: bool,
     pub break_reminder_mins: u64,
     pub website_tracking: bool,
     pub overrides_per_day: i64,
@@ -481,6 +523,7 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Set
         theme: s.theme,
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         notifications_enabled: s.notifications_enabled,
+        show_quotes: crate::quotes::enabled(),
         break_reminder_mins: s.break_reminder_mins,
         website_tracking: s.website_tracking,
         overrides_per_day: s.overrides_per_day,
@@ -623,6 +666,13 @@ pub fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) -> C
 }
 
 #[tauri::command]
+pub fn set_show_quotes(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    crate::quotes::set_enabled(enabled);
+    let conn = conn!(state);
+    db::set_setting(&conn, "show_quotes", if enabled { "1" } else { "0" }).map_err(err)
+}
+
+#[tauri::command]
 pub fn set_break_reminder(state: State<'_, AppState>, mins: u64) -> CmdResult<()> {
     if mins > 8 * 60 {
         return Err("Break reminder must be at most 8 hours".into());
@@ -661,11 +711,15 @@ pub fn get_websites(
     state: State<'_, AppState>,
     from: String,
     to: String,
+    device: Option<String>,
 ) -> CmdResult<Vec<SiteUsage>> {
     an::parse_day(&from)?;
     an::parse_day(&to)?;
     let conn = conn!(state);
-    an::site_usage(&conn, &from, &to).map_err(err)
+    let ids = an::device_filter(&conn, device.as_deref()).map_err(err)?;
+    let _view = db::device_view(&conn, ids.as_deref()).map_err(err)?;
+    let sites = an::site_usage(&conn, &from, &to).map_err(err)?;
+    an::sites_by_device(&conn, sites, &from, &to).map_err(err)
 }
 
 #[tauri::command]
@@ -737,6 +791,7 @@ pub fn get_limits(state: State<'_, AppState>) -> CmdResult<Vec<LimitStatus>> {
 
 /// Creates or updates the limit for an app or website.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn set_limit(
     state: State<'_, AppState>,
     target_type: String,
@@ -745,7 +800,12 @@ pub fn set_limit(
     warn_pct: i64,
     action: String,
     enabled: bool,
+    reach: Option<String>,
 ) -> CmdResult<()> {
+    let reach = reach.unwrap_or_else(|| "device".into());
+    if reach != "device" && reach != "all" {
+        return Err("A limit applies to this device or all devices".into());
+    }
     if !crate::limits::ACTIONS.contains(&action.as_str()) {
         return Err(format!("unknown limit action: {action}"));
     }
@@ -760,12 +820,13 @@ pub fn set_limit(
     }
     let conn = conn!(state);
     conn.execute(
-        "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled, reach)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(target_type, target_id) DO UPDATE SET
            daily_limit_secs = excluded.daily_limit_secs, warn_pct = excluded.warn_pct,
-           block = excluded.block, action = excluded.action, enabled = excluded.enabled",
-        params![target_type, target_id, daily_limit_secs, warn_pct, action != "notify", action, enabled],
+           block = excluded.block, action = excluded.action, enabled = excluded.enabled,
+           reach = excluded.reach",
+        params![target_type, target_id, daily_limit_secs, warn_pct, action != "notify", action, enabled, reach],
     )
     .map_err(err)?;
     let id: i64 = conn
@@ -934,11 +995,19 @@ pub async fn start_focus(
     app: AppHandle,
     state: State<'_, AppState>,
     plan: crate::focus::FocusPlan,
+    devices: Option<Vec<String>>,
 ) -> CmdResult<crate::focus::FocusStatus> {
+    let devices = devices.unwrap_or_default();
+    if devices.len() > 50 || devices.iter().any(|d| d.len() > 64) {
+        return Err("Too many devices".into());
+    }
     let status = {
         let conn = conn!(state);
-        crate::focus::start(&conn, &state.shared, plan)?
+        crate::focus::start(&conn, &state.shared, plan, devices)?
     };
+    if status.run.is_some() {
+        state.sync.wake();
+    }
     crate::popup::open(&app);
     if state.shared.notifications_enabled.load(Ordering::SeqCst) {
         let what = if status.mode == "study" {
@@ -993,6 +1062,7 @@ pub fn stop_focus(
     let conn = conn!(state);
     crate::focus::stop(&conn, &state.shared, phrase.as_deref())?;
     crate::popup::close(&app);
+    state.sync.wake();
     Ok(())
 }
 
@@ -1055,6 +1125,12 @@ pub fn set_goal(
             conn.execute(
                 "DELETE FROM sent_notifications WHERE key LIKE ?1",
                 params![format!("goal:{id}:%")],
+            )
+            .map_err(err)?;
+            // The changed goal may be achieved again, on any device.
+            conn.execute(
+                "DELETE FROM shared_notices WHERE key LIKE 'goal:' || (SELECT uuid FROM goals WHERE id = ?1) || ':%'",
+                params![id],
             )
             .map_err(err)?;
         }
@@ -1406,6 +1482,20 @@ pub fn open_usage_access(app: AppHandle) -> CmdResult<()> {
     app.usage().open_access_settings()
 }
 
+/// Phones: whether app blocking (an accessibility service) is on (#69).
+#[tauri::command]
+pub fn phone_blocking(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().blocking_enabled()
+}
+
+/// Opens Android's accessibility settings, after FocusTrack's explanation.
+#[tauri::command]
+pub fn open_phone_blocking(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_focustrack_usage::UsageExt;
+    app.usage().open_blocking_settings()
+}
+
 /// Imports new phone usage now (when the app comes to the front). Returns how
 /// many sessions were added, or null without usage access.
 #[tauri::command]
@@ -1425,4 +1515,72 @@ pub async fn import_phone_usage(
     })
     .await
     .map_err(err)?
+}
+
+// ------------------------------------------------------- cloud data (#67)
+
+/// Deletes synced history everywhere: all (`before` = null) or before a day,
+/// for all devices or one. Returns how many records the server removed.
+#[tauri::command]
+pub async fn sync_delete_history(
+    state: State<'_, AppState>,
+    before: Option<String>,
+    device: Option<String>,
+) -> CmdResult<u64> {
+    with_sync(&state, move |h, c| {
+        crate::sync::delete_history(h, c, before.as_deref(), device.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_delete_account(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    with_sync(&state, move |h, c| {
+        crate::sync::delete_account(h, c, &password)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_retention(state: State<'_, AppState>) -> CmdResult<Option<u32>> {
+    with_sync(&state, crate::sync::retention).await
+}
+
+#[tauri::command]
+pub async fn sync_set_retention(
+    state: State<'_, AppState>,
+    days: Option<u32>,
+) -> CmdResult<Option<u32>> {
+    with_sync(&state, move |h, c| crate::sync::set_retention(h, c, days)).await
+}
+
+/// Exports everything in the account (decrypted) to a JSON file in Downloads.
+/// Returns the file's path.
+#[tauri::command]
+pub async fn sync_export(app: AppHandle, state: State<'_, AppState>) -> CmdResult<String> {
+    let dir = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| state.data_dir.clone());
+    let file = dir.join(format!(
+        "FocusTrack-export-{}.json",
+        Local::now().format("%Y-%m-%d-%H%M")
+    ));
+    let out = file.clone();
+    with_sync(&state, move |h, c| crate::sync::export(h, c, &out)).await?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
+/// Pause tracking or turn sync off on a device (#66).
+#[tauri::command]
+pub async fn sync_device_control(
+    state: State<'_, AppState>,
+    id: String,
+    pause_tracking: Option<bool>,
+    sync_enabled: Option<bool>,
+) -> CmdResult<()> {
+    with_sync(&state, move |h, c| {
+        crate::sync::set_device_control(h, c, &id, pause_tracking, sync_enabled)
+    })
+    .await
 }

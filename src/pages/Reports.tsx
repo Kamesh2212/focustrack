@@ -7,7 +7,7 @@ import { CategoryDonut, DailyChart, Heatmap, HourlyChart, ProductivityChart } fr
 import { InsightList } from "../components/Insights";
 import { AppList } from "../components/AppList";
 import { SiteList } from "../components/SiteList";
-import { DeviceBreakdown, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
+import { DeviceBreakdown, DeviceComparison, DevicePicker, hasSeveral, useDeviceFilter } from "../components/Devices";
 
 export default function Reports() {
   const [range, setRange] = useState<RangeKey>("7d");
@@ -74,6 +74,11 @@ export default function Reports() {
           {hasSeveral(r.devices) && (
             <div className="mt-4">
               <DeviceBreakdown devices={r.devices} uniqueSecs={r.devicesUniqueSecs} onPick={setDevice} title="Devices in this period" />
+            </div>
+          )}
+          {r.comparison.length > 1 && (
+            <div className="mt-4">
+              <DeviceComparison devices={r.comparison} onPick={setDevice} />
             </div>
           )}
 

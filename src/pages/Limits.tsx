@@ -3,7 +3,7 @@ import { AppWindow, Globe, Pencil, Plus, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/hooks";
 import { addDays, fmtDuration, today } from "../lib/format";
-import type { LimitAction, LimitStatus } from "../lib/types";
+import type { LimitAction, LimitReach, LimitStatus } from "../lib/types";
 import { AppBadge, Button, Card, Empty, ErrorNote, PageHeader, Segmented, Toggle, cx } from "../components/ui";
 
 type TargetType = "app" | "website";
@@ -16,6 +16,7 @@ interface Draft {
   warnPct: number;
   action: LimitAction;
   enabled: boolean;
+  reach: LimitReach;
 }
 
 const ACTIONS: { value: LimitAction; label: string; short: string; appDesc: string; siteDesc: string }[] = [
@@ -27,7 +28,7 @@ const ACTIONS: { value: LimitAction; label: string; short: string; appDesc: stri
 const PRESETS = [15, 30, 60, 90, 120, 180];
 
 function emptyDraft(targetType: TargetType = "website"): Draft {
-  return { targetType, targetId: null, hours: 1, minutes: 0, warnPct: 80, action: "warn_then_block", enabled: true };
+  return { targetType, targetId: null, hours: 1, minutes: 0, warnPct: 80, action: "warn_then_block", enabled: true, reach: "device" };
 }
 
 function LimitEditor({
@@ -48,6 +49,9 @@ function LimitEditor({
   const apps = useLoad(() => api.apps(from, today()), []);
   const sites = useLoad(() => api.websites(from, today()), []);
   const installed = useLoad(() => api.installedApps(), []);
+  const sync = useLoad(() => api.syncStatus(), []);
+  // Offer "all my devices" when signed in to sync, or when the limit already has it.
+  const canReach = Boolean(sync.data?.signedIn) || initial.reach === "all";
   // "id:<n>" for apps/sites FocusTrack knows, "exe:<name>" for installed apps never used yet.
   const [pick, setPick] = useState(initial.targetId !== null ? `id:${initial.targetId}` : "");
 
@@ -82,6 +86,7 @@ function LimitEditor({
         warnPct: d.warnPct,
         action: d.action,
         enabled: d.enabled,
+        reach: d.reach,
       });
       onDone();
     } catch (e) {
@@ -221,6 +226,26 @@ function LimitEditor({
               ))}
             </div>
           </fieldset>
+          {canReach && (
+            <div className="text-sm">
+              <span className="mb-1 block text-slate-500">Counts usage on</span>
+              <Segmented<LimitReach>
+                value={d.reach}
+                onChange={(reach) => setD({ ...d, reach })}
+                options={[
+                  { value: "device", label: "This device" },
+                  { value: "all", label: "All my devices" },
+                ]}
+              />
+              {d.reach === "all" && (
+                <span className="mt-1 block text-xs text-slate-500">
+                  Time on every synced device adds up{d.targetType === "website" ? ", including the site's phone app (YouTube app for youtube.com)" : ""}.
+                  A device only learns about the others' time when they sync, so blocking can lag by a few minutes, and an
+                  offline device keeps counting its own time only.
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <div className="mt-5 flex gap-2">
@@ -257,6 +282,14 @@ function LimitRow({ l, onEdit, onChange, onError }: { l: LimitStatus; onEdit: ()
               includes games in this launcher
             </span>
           )}
+          {l.reach === "all" && (
+            <span
+              className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+              title="Usage on all your synced devices counts toward this limit."
+            >
+              all devices
+            </span>
+          )}
           {l.extraSecs > 0 && (
             <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:bg-amber-950 dark:text-amber-300">
               +{fmtDuration(l.extraSecs)} today
@@ -272,6 +305,7 @@ function LimitRow({ l, onEdit, onChange, onError }: { l: LimitStatus; onEdit: ()
         <div className="tabular mt-1.5 flex justify-between text-xs text-slate-500">
           <span>
             {fmtDuration(l.usedSecs)} of {fmtDuration(allowed)} today
+            {l.othersSecs > 0 && ` · ${fmtDuration(l.othersSecs)} on other devices`}
           </span>
           <span className={cx(over && "font-medium text-rose-600 dark:text-rose-400", warn && "text-amber-600 dark:text-amber-400")}>
             {over ? (l.action === "notify" ? "Limit reached" : "Limit reached · blocked") : `${fmtDuration(allowed - l.usedSecs)} left`}
@@ -338,6 +372,7 @@ export default function Limits() {
         warnPct: l.warnPct,
         action: l.action,
         enabled: l.enabled,
+        reach: l.reach,
       },
     });
 

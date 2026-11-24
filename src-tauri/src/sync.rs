@@ -28,6 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// While a focus session runs on several devices, so ending it reaches the others quickly (#71).
+const FOCUS_RUN_SYNC_EVERY: Duration = Duration::from_secs(15);
 const BATCH: usize = 500;
 /// Detailed history a new device downloads (design D7).
 const FIRST_SYNC_DAYS: u32 = 35;
@@ -338,6 +340,8 @@ enum Source {
     Table(&'static str),
     Tombstone,
     Device,
+    /// An app's or website's category: (table, key column, key).
+    Category(&'static str, &'static str, String),
 }
 
 struct Outgoing {
@@ -384,12 +388,14 @@ fn collect_pending(
         });
     };
 
-    // The device record (its name), whenever it changed.
+    // The device record (name and status), whenever it changed.
     let name = device_name(conn);
     let dev_version: i64 = setting(conn, "device_record_version")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if setting(conn, "device_record_synced").as_deref() != Some(&format!("{dev_version}:{name}")) {
+    if setting(conn, "device_record_synced").as_deref()
+        != Some(&format!("{dev_version}:{}", device_signature(conn)))
+    {
         seal(
             &mut out,
             me.clone(),
@@ -398,8 +404,43 @@ fn collect_pending(
             dev_version + 1,
             None,
             false,
-            json!({ "name": name, "platform": PLATFORM, "appVersion": env!("CARGO_PKG_VERSION") }),
+            json!({
+                "name": name,
+                "platform": PLATFORM,
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "paused": setting(conn, "paused").as_deref() == Some("1"),
+                "syncError": setting(conn, "sync_error"),
+            }),
             Source::Device,
+        );
+    }
+
+    // Remote controls for devices (#66).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, target, pause_tracking, sync_enabled FROM device_controls
+         WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "target": s(r, 3)?, "pauseTracking": r.get::<_, i64>(4)? != 0,
+                    "syncEnabled": r.get::<_, i64>(5)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::DEVICE_CONTROL,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("device_controls"),
         );
     }
 
@@ -522,7 +563,7 @@ fn collect_pending(
 
     let mut stmt = conn.prepare(
         "SELECT l.uuid, l.version, l.hlc, l.target_type, a.app_key, a.exe_name, COALESCE(a.exe_path, ''),
-                a.display_name, w.domain, l.daily_limit_secs, l.warn_pct, l.action, l.enabled
+                a.display_name, w.domain, l.daily_limit_secs, l.warn_pct, l.action, l.enabled, l.reach
          FROM usage_limits l
          LEFT JOIN applications a ON l.target_type = 'app' AND a.id = l.target_id
          LEFT JOIN websites w ON l.target_type = 'website' AND w.id = l.target_id
@@ -535,7 +576,8 @@ fn collect_pending(
             r.get::<_, Option<String>>(2)?,
             json!({ "targetType": s(r, 3)?, "appKey": s(r, 4)?, "exe": s(r, 5)?, "path": s(r, 6)?,
                     "name": s(r, 7)?, "domain": s(r, 8)?, "dailyLimitSecs": r.get::<_, i64>(9)?,
-                    "warnPct": r.get::<_, i64>(10)?, "action": s(r, 11)?, "enabled": r.get::<_, i64>(12)? != 0 }),
+                    "warnPct": r.get::<_, i64>(10)?, "action": s(r, 11)?, "enabled": r.get::<_, i64>(12)? != 0,
+                    "reach": s(r, 13)? }),
         ))
     })?;
     for row in rows {
@@ -610,6 +652,156 @@ fn collect_pending(
         );
     }
 
+    // Blocking profiles (#62).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, name, mode, categories, apps, sites, unblock_on_breaks, end_early, builtin
+         FROM block_profiles WHERE version > synced_version LIMIT ?1",
+    )?;
+    let list = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Value> {
+        Ok(serde_json::from_str(&s(r, i)?).unwrap_or_else(|_| json!([])))
+    };
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "name": s(r, 3)?, "mode": s(r, 4)?, "categories": list(r, 5)?, "apps": list(r, 6)?,
+                    "sites": list(r, 7)?, "unblockOnBreaks": r.get::<_, i64>(8)? != 0,
+                    "endEarly": s(r, 9)?, "builtin": r.get::<_, i64>(10)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::PROFILE,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("block_profiles"),
+        );
+    }
+
+    // Focus sessions shared between devices (#71).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, plan, profile_uuid, start_utc, planned_end_utc, devices, origin, ended_utc, ended_early
+         FROM focus_runs WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        let parse = |t: String| serde_json::from_str::<Value>(&t).unwrap_or(Value::Null);
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "plan": parse(s(r, 3)?), "profile": r.get::<_, Option<String>>(4)?,
+                    "start": r.get::<_, i64>(5)?, "plannedEnd": r.get::<_, i64>(6)?,
+                    "devices": parse(s(r, 7)?), "origin": s(r, 8)?, "ended": r.get::<_, Option<i64>>(9)?,
+                    "endedEarly": r.get::<_, i64>(10)? != 0 }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::FOCUS_RUN,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Table("focus_runs"),
+        );
+    }
+
+    // Notifications already shown on a device (#72).
+    let mut stmt = conn.prepare(
+        "SELECT uuid, version, hlc, key, day FROM shared_notices WHERE version > synced_version LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            s(r, 4)?,
+            json!({ "key": s(r, 3)?, "day": s(r, 4)? }),
+        ))
+    })?;
+    for row in rows {
+        let (id, v, h, day, body) = row?;
+        seal(
+            &mut out,
+            id,
+            kind::NOTICE,
+            day,
+            v,
+            h,
+            false,
+            body,
+            Source::Table("shared_notices"),
+        );
+    }
+
+    // Categories the user picked for apps and websites (#62).
+    let mut stmt = conn.prepare(
+        "SELECT a.app_key, a.cat_version, a.cat_hlc, a.exe_name, COALESCE(a.exe_path, ''), a.display_name, c.name
+         FROM applications a LEFT JOIN categories c ON c.id = a.category_id
+         WHERE a.cat_version > a.cat_synced LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "appKey": s(r, 0)?, "exe": s(r, 3)?, "path": s(r, 4)?, "name": s(r, 5)?,
+                    "category": r.get::<_, Option<String>>(6)? }),
+        ))
+    })?;
+    for row in rows {
+        let (key, v, h, body) = row?;
+        seal(
+            &mut out,
+            focustrack_sync_proto::name_id("app_category", &key),
+            kind::APP_CATEGORY,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Category("applications", "app_key", key),
+        );
+    }
+    let mut stmt = conn.prepare(
+        "SELECT w.domain, w.cat_version, w.cat_hlc, c.name
+         FROM websites w LEFT JOIN categories c ON c.id = w.category_id
+         WHERE w.cat_version > w.cat_synced LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |r| {
+        Ok((
+            s(r, 0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            json!({ "domain": s(r, 0)?, "category": r.get::<_, Option<String>>(3)? }),
+        ))
+    })?;
+    for row in rows {
+        let (domain, v, h, body) = row?;
+        seal(
+            &mut out,
+            focustrack_sync_proto::name_id("site_category", &domain.to_ascii_lowercase()),
+            kind::SITE_CATEGORY,
+            today(),
+            v,
+            h,
+            false,
+            body,
+            Source::Category("websites", "domain", domain),
+        );
+    }
+
     let mut stmt = conn.prepare(
         "SELECT uuid, kind, day, hlc, version FROM sync_tombstones WHERE synced = 0 LIMIT ?1",
     )?;
@@ -621,6 +813,9 @@ fn collect_pending(
         let k: &'static str = match k.as_str() {
             "limit" => kind::LIMIT,
             "goal" => kind::GOAL,
+            "profile" => kind::PROFILE,
+            "focus_run" => kind::FOCUS_RUN,
+            "notice" => kind::NOTICE,
             _ => kind::GOAL_CHECK,
         };
         seal(
@@ -650,7 +845,7 @@ fn mark_synced(
         let Some(&v) = acked.get(&o.env.id) else {
             continue;
         };
-        match o.source {
+        match &o.source {
             Source::Table(t) => {
                 conn.execute(
                     &format!("UPDATE {t} SET synced_version = ?2 WHERE uuid = ?1 AND version = ?2"),
@@ -663,12 +858,20 @@ fn mark_synced(
                     params![o.env.id, v],
                 )?;
             }
+            Source::Category(t, col, key) => {
+                conn.execute(
+                    &format!(
+                        "UPDATE {t} SET cat_synced = ?2 WHERE {col} = ?1 AND cat_version = ?2"
+                    ),
+                    params![key, v],
+                )?;
+            }
             Source::Device => {
                 db::set_setting(conn, "device_record_version", &v.to_string())?;
                 db::set_setting(
                     conn,
                     "device_record_synced",
-                    &format!("{v}:{}", device_name(conn)),
+                    &format!("{v}:{}", device_signature(conn)),
                 )?;
             }
         }
@@ -733,6 +936,9 @@ fn table_for(k: &str) -> Option<&'static str> {
         kind::LIMIT => "usage_limits",
         kind::GOAL => "goals",
         kind::GOAL_CHECK => "goal_checks",
+        kind::PROFILE => "block_profiles",
+        kind::FOCUS_RUN => "focus_runs",
+        kind::NOTICE => "shared_notices",
         _ => return None,
     })
 }
@@ -807,14 +1013,36 @@ fn app_id(conn: &Connection, b: &Value) -> rusqlite::Result<i64> {
 
 /// Applies one record; returns whether anything changed.
 fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    if env.kind == kind::PURGE {
+        // Another device deleted history; remove our copies too (#67).
+        let device = opt_str(b, "device");
+        purge_local(conn, str_of(b, "until"), device.as_deref())?;
+        return Ok(true);
+    }
     if env.kind == kind::DEVICE {
         conn.execute(
-            "INSERT INTO devices (id, name, platform, app_version, last_seen) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO devices (id, name, platform, app_version, last_seen, paused, sync_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform,
-                 app_version = excluded.app_version, last_seen = excluded.last_seen",
-            params![env.device, str_of(b, "name"), str_of(b, "platform"), str_of(b, "appVersion"), db::fmt_time(now())],
+                 app_version = excluded.app_version, last_seen = excluded.last_seen,
+                 paused = excluded.paused, sync_error = excluded.sync_error",
+            params![
+                env.device,
+                str_of(b, "name"),
+                str_of(b, "platform"),
+                str_of(b, "appVersion"),
+                db::fmt_time(now()),
+                bool_of(b, "paused"),
+                opt_str(b, "syncError")
+            ],
         )?;
         return Ok(true);
+    }
+    if env.kind == kind::DEVICE_CONTROL {
+        return apply_control(conn, env, b);
+    }
+    if env.kind == kind::APP_CATEGORY || env.kind == kind::SITE_CATEGORY {
+        return apply_category(conn, env, b);
     }
     let Some(t) = table_for(&env.kind) else {
         return Ok(false); // a newer app's record kind: ignore
@@ -927,12 +1155,13 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
             };
             conn.execute(
                 "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, warn_pct, block, action, enabled,
-                     uuid, device_id, version, synced_version, hlc)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
+                     uuid, device_id, version, synced_version, hlc, reach)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12)
                  ON CONFLICT(uuid) DO UPDATE SET target_type = excluded.target_type, target_id = excluded.target_id,
                      daily_limit_secs = excluded.daily_limit_secs, warn_pct = excluded.warn_pct, block = excluded.block,
                      action = excluded.action, enabled = excluded.enabled, device_id = excluded.device_id,
-                     version = excluded.version, synced_version = excluded.synced_version, hlc = excluded.hlc",
+                     version = excluded.version, synced_version = excluded.synced_version, hlc = excluded.hlc,
+                     reach = excluded.reach",
                 params![
                     tt,
                     target,
@@ -944,7 +1173,8 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                     env.id,
                     dev,
                     v,
-                    env.hlc
+                    env.hlc,
+                    if str_of(b, "reach") == "all" { "all" } else { "device" }
                 ],
             )?;
         }
@@ -992,8 +1222,148 @@ fn apply_one(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<b
                 params![goal, str_of(b, "day"), env.id, dev, v, env.hlc],
             )?;
         }
+        kind::NOTICE => {
+            conn.execute(
+                "INSERT INTO shared_notices (key, day, uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+                 ON CONFLICT(uuid) DO UPDATE SET device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc
+                 ON CONFLICT(key, day) DO NOTHING",
+                params![str_of(b, "key"), str_of(b, "day"), env.id, dev, v, env.hlc],
+            )?;
+        }
+        kind::FOCUS_RUN => {
+            let plan = b.get("plan").cloned().unwrap_or(Value::Null);
+            if serde_json::from_value::<crate::focus::FocusPlan>(plan.clone()).is_err() {
+                return Ok(false);
+            }
+            let devices = b
+                .get("devices")
+                .filter(|v| v.is_array())
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            conn.execute(
+                "INSERT INTO focus_runs (plan, profile_uuid, start_utc, planned_end_utc, devices, origin, ended_utc,
+                     ended_early, uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
+                 ON CONFLICT(uuid) DO UPDATE SET plan = excluded.plan, profile_uuid = excluded.profile_uuid,
+                     start_utc = excluded.start_utc, planned_end_utc = excluded.planned_end_utc,
+                     devices = excluded.devices, origin = excluded.origin, ended_utc = excluded.ended_utc,
+                     ended_early = excluded.ended_early, device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc",
+                params![plan.to_string(), opt_str(b, "profile"), int_of(b, "start"), int_of(b, "plannedEnd"),
+                        devices.to_string(), str_of(b, "origin"), b.get("ended").and_then(Value::as_i64),
+                        bool_of(b, "endedEarly"), env.id, dev, v, env.hlc],
+            )?;
+        }
+        kind::PROFILE => {
+            let mode = str_of(b, "mode");
+            let base = str_of(b, "name").trim();
+            if !(mode == "block" || mode == "allow_only") || base.is_empty() {
+                return Ok(false);
+            }
+            let end_early = match str_of(b, "endEarly") {
+                e @ ("allow" | "confirm" | "strict") => e,
+                _ => "confirm",
+            };
+            // Two devices made a profile with the same name while offline: keep both.
+            let mut name = base.to_string();
+            let mut n = 2;
+            while conn
+                .query_row(
+                    "SELECT 1 FROM block_profiles WHERE name = ?1 AND uuid IS NOT ?2",
+                    params![name, env.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                name = format!("{base} ({n})");
+                n += 1;
+            }
+            let list = |k: &str| {
+                let v = b
+                    .get(k)
+                    .filter(|v| v.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                v.to_string()
+            };
+            conn.execute(
+                "INSERT INTO block_profiles (name, mode, categories, apps, sites, unblock_on_breaks, end_early, builtin,
+                     uuid, device_id, version, synced_version, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
+                 ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, mode = excluded.mode,
+                     categories = excluded.categories, apps = excluded.apps, sites = excluded.sites,
+                     unblock_on_breaks = excluded.unblock_on_breaks, end_early = excluded.end_early,
+                     device_id = excluded.device_id, version = excluded.version,
+                     synced_version = excluded.synced_version, hlc = excluded.hlc",
+                params![name, mode, list("categories"), list("apps"), list("sites"), bool_of(b, "unblockOnBreaks"),
+                        end_early, bool_of(b, "builtin"), env.id, dev, v, env.hlc],
+            )?;
+        }
         _ => return Ok(false),
     }
+    Ok(true)
+}
+
+/// A focus session shared with other devices is running (#71).
+fn focus_run_active(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM focus_runs WHERE ended_utc IS NULL AND planned_end_utc > unixepoch())",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Another device changed the category of an app or website (#62).
+fn apply_category(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    let app = env.kind == kind::APP_CATEGORY;
+    let (table, col, key) = if app {
+        ("applications", "app_key", str_of(b, "appKey"))
+    } else {
+        ("websites", "domain", str_of(b, "domain"))
+    };
+    if key.is_empty() {
+        return Ok(false);
+    }
+    let local: Option<Option<String>> = conn
+        .query_row(
+            &format!("SELECT cat_hlc FROM {table} WHERE {col} = ?1"),
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(h) = &local {
+        if !hlc::newer(env.hlc.as_deref().unwrap_or(""), h.as_deref().unwrap_or("")) {
+            return Ok(false);
+        }
+    }
+    let category: Option<i64> = match opt_str(b, "category") {
+        Some(name) => match conn
+            .query_row(
+                "SELECT id FROM categories WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?
+        {
+            Some(id) => Some(id),
+            None => return Ok(false), // a category this version doesn't have
+        },
+        None => None,
+    };
+    let id = if app {
+        let name = str_of(b, "name").to_string();
+        db::get_or_create_app(conn, str_of(b, "exe"), str_of(b, "path"), || name, now())?.0
+    } else {
+        db::get_or_create_website(conn, key, now())?
+    };
+    conn.execute(
+        &format!("UPDATE {table} SET category_id = ?1, cat_hlc = ?2, cat_version = ?3, cat_synced = ?3 WHERE id = ?4"),
+        params![category, env.hlc, env.version, id],
+    )?;
     Ok(true)
 }
 
@@ -1169,12 +1539,33 @@ pub fn spawn(handle: Arc<SyncHandle>, db_path: PathBuf, shared: Arc<crate::track
                     break;
                 }
                 let woken = handle.wake.swap(false, Ordering::SeqCst);
-                let due = last.elapsed() >= SYNC_EVERY.max(backoff);
+                let every = if focus_run_active(&conn) {
+                    FOCUS_RUN_SYNC_EVERY
+                } else {
+                    SYNC_EVERY
+                };
+                let due = last.elapsed() >= every.max(backoff);
                 let enabled = setting(&conn, "sync_enabled").as_deref() == Some("1");
                 if enabled && handle.signed_in() && (woken || due) {
                     handle.set(|s| s.state = "syncing".into());
                     let result = sync_once(&handle, &mut conn);
                     last = Instant::now();
+                    // A remote control may have paused or resumed tracking here.
+                    let paused = setting(&conn, "paused").as_deref() == Some("1");
+                    if shared.paused.swap(paused, Ordering::SeqCst) != paused {
+                        eprintln!(
+                            "[sync] tracking {} by another device",
+                            if paused { "paused" } else { "resumed" }
+                        );
+                    }
+                    let _ = db::set_setting(
+                        &conn,
+                        "sync_error",
+                        &match &result {
+                            Ok(()) | Err(SyncError::Revoked) => String::new(),
+                            Err(e) => e.to_string().chars().take(160).collect(),
+                        },
+                    );
                     match result {
                         Ok(()) => {
                             backoff = Duration::ZERO;
@@ -1234,8 +1625,15 @@ fn reset_for_account(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    // Untouched built-in profiles (the oldest clock) are the same everywhere.
     for t in db::SHARED_TABLES {
-        conn.execute(&format!("UPDATE {t} SET synced_version = 0"), [])?;
+        conn.execute(
+            &format!("UPDATE {t} SET synced_version = 0 WHERE hlc NOT LIKE '0:0:%'"),
+            [],
+        )?;
+    }
+    for t in ["applications", "websites"] {
+        conn.execute(&format!("UPDATE {t} SET cat_synced = 0"), [])?;
     }
     conn.execute("DELETE FROM sync_tombstones", [])?;
     for k in ["sync_cursor", "device_record_synced", "sync_last"] {
@@ -1422,7 +1820,106 @@ pub fn sign_out(handle: &SyncHandle, conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Devices on the account, with names from their device records.
+/// What this device publishes about itself; the device record is re-sent when it changes.
+fn device_signature(conn: &Connection) -> String {
+    format!(
+        "{}|{}|{}",
+        device_name(conn),
+        setting(conn, "paused").as_deref() == Some("1"),
+        setting(conn, "sync_error").unwrap_or_default()
+    )
+}
+
+/// A remote control from another device (or this one). Applies it here when
+/// it targets this device: pause tracking, or turn sync off (#66).
+fn apply_control(conn: &Connection, env: &Envelope, b: &Value) -> rusqlite::Result<bool> {
+    let target = str_of(b, "target").to_string();
+    if target.is_empty() {
+        return Ok(false);
+    }
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT hlc FROM device_controls WHERE target = ?1",
+            params![target],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if local
+        .as_deref()
+        .is_some_and(|h| !hlc::newer(env.hlc.as_deref().unwrap_or(""), h))
+    {
+        return Ok(false);
+    }
+    let (pause, sync) = (
+        bool_of(b, "pauseTracking"),
+        b.get("syncEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
+    conn.execute(
+        "INSERT INTO device_controls (target, uuid, pause_tracking, sync_enabled, hlc, version, synced_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(target) DO UPDATE SET uuid = excluded.uuid, pause_tracking = excluded.pause_tracking,
+             sync_enabled = excluded.sync_enabled, hlc = excluded.hlc, version = excluded.version,
+             synced_version = excluded.synced_version",
+        params![target, env.id, pause, sync, env.hlc, env.version],
+    )?;
+    if target == device_id(conn)? {
+        db::set_setting(conn, "paused", if pause { "1" } else { "0" })?;
+        if !sync {
+            db::set_setting(conn, "sync_enabled", "0")?;
+        }
+    }
+    Ok(true)
+}
+
+/// Pauses tracking or turns sync off on a device (this one or another). Another
+/// device applies it at its next sync. Sync turned off remotely can only be
+/// turned back on from that device.
+pub fn set_device_control(
+    handle: &SyncHandle,
+    conn: &Connection,
+    target: &str,
+    pause_tracking: Option<bool>,
+    sync_enabled: Option<bool>,
+) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let me = device_id(conn).map_err(e)?;
+    let current: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT pause_tracking, sync_enabled, version FROM device_controls WHERE target = ?1",
+            params![target],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(e)?;
+    let (pause0, sync0, version) = current.unwrap_or((0, 1, 0));
+    let pause = pause_tracking.unwrap_or(pause0 != 0);
+    let sync = sync_enabled.unwrap_or(sync0 != 0);
+    let hlc = format!("{}:0:{me}", chrono::Utc::now().timestamp_millis());
+    conn.execute(
+        "INSERT INTO device_controls (target, uuid, pause_tracking, sync_enabled, hlc, version, synced_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+         ON CONFLICT(target) DO UPDATE SET pause_tracking = excluded.pause_tracking,
+             sync_enabled = excluded.sync_enabled, hlc = excluded.hlc, version = excluded.version",
+        params![
+            target,
+            focustrack_sync_proto::name_id("device_control", target),
+            pause,
+            sync,
+            hlc,
+            version + 1
+        ],
+    )
+    .map_err(e)?;
+    if target == me {
+        db::set_setting(conn, "paused", if pause { "1" } else { "0" }).map_err(e)?;
+    }
+    handle.wake();
+    Ok(())
+}
+
+/// Devices on the account, with names and status from their device records.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRow {
@@ -1430,36 +1927,92 @@ pub struct DeviceRow {
     pub name: String,
     pub platform: String,
     pub app_version: String,
+    /// When the device last talked to the server (≈ last sync).
     pub last_seen: Option<String>,
+    /// Synced in the last few minutes.
+    pub online: bool,
+    /// Its newest recorded usage that this device has.
+    pub last_activity: Option<String>,
+    /// Tracking is paused on it.
+    pub paused: bool,
+    /// The last sync problem it reported.
+    pub sync_error: Option<String>,
+    /// Sync was turned off for it from another device.
+    pub sync_disabled: bool,
     pub current: bool,
 }
 
 pub fn devices(handle: &SyncHandle, conn: &Connection) -> Result<Vec<DeviceRow>, String> {
+    let e = |e: rusqlite::Error| e.to_string();
     let list: Vec<DeviceInfo> = call(handle, conn, |c| c.devices()).map_err(|e| e.to_string())?;
-    let names: HashMap<String, String> = conn
-        .prepare("SELECT id, name FROM devices")
+    type Known = (String, bool, Option<String>);
+    let known: HashMap<String, Known> = conn
+        .prepare("SELECT id, name, paused, sync_error FROM devices")
         .and_then(|mut s| {
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<HashMap<_, _>, _>>()
+            s.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?),
+                ))
+            })?
+            .collect::<Result<HashMap<_, _>, _>>()
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e)?;
+    let disabled: HashMap<String, bool> = conn
+        .prepare("SELECT target, sync_enabled FROM device_controls")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? == 0))
+            })?
+            .collect::<Result<HashMap<_, _>, _>>()
+        })
+        .map_err(e)?;
+    let last_activity = |id: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT MAX(end_time) FROM usage_sessions WHERE device_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+    let now = chrono::Utc::now();
     Ok(list
         .into_iter()
-        .map(|d| DeviceRow {
-            name: if d.current {
-                device_name(conn)
-            } else {
-                names
-                    .get(&d.id)
-                    .cloned()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| "Unnamed device".into())
-            },
-            id: d.id,
-            platform: d.platform,
-            app_version: d.app_version,
-            last_seen: d.last_seen,
-            current: d.current,
+        .map(|d| {
+            let k = known.get(&d.id);
+            let online = d.current
+                || d.last_seen
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_some_and(|t| (now - t.with_timezone(&chrono::Utc)).num_minutes() < 3);
+            DeviceRow {
+                name: if d.current {
+                    device_name(conn)
+                } else {
+                    k.map(|k| k.0.clone())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| "Unnamed device".into())
+                },
+                online,
+                last_activity: last_activity(&d.id),
+                paused: if d.current {
+                    setting(conn, "paused").as_deref() == Some("1")
+                } else {
+                    k.is_some_and(|k| k.1)
+                },
+                sync_error: if d.current {
+                    setting(conn, "sync_error")
+                } else {
+                    k.and_then(|k| k.2.clone())
+                },
+                sync_disabled: !d.current && disabled.get(&d.id).copied().unwrap_or(false),
+                id: d.id,
+                platform: d.platform,
+                app_version: d.app_version,
+                last_seen: d.last_seen,
+                current: d.current,
+            }
         })
         .collect())
 }
@@ -1476,6 +2029,153 @@ pub fn set_enabled(handle: &SyncHandle, conn: &Connection, on: bool) -> Result<(
     }
     refresh_status(handle, conn);
     Ok(())
+}
+
+// ------------------------------------------------------- cloud data (#67)
+
+/// Deletes usage history (all devices' rows, or one device's) recorded before
+/// `until` (`YYYY-MM-DD HH:MM:SS`) from this device's database.
+fn purge_local(conn: &Connection, until: &str, device: Option<&str>) -> rusqlite::Result<usize> {
+    if db::parse_time(until).is_none() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for t in db::OWNED_TABLES {
+        n += conn.execute(
+            &format!("DELETE FROM {t} WHERE start_time < ?1 AND (?2 IS NULL OR device_id = ?2)"),
+            params![until, device],
+        )?;
+    }
+    Ok(n)
+}
+
+fn account_key(handle: &SyncHandle) -> Result<AccountKey, String> {
+    handle
+        .secrets
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().map(|s| s.account_key.clone()))
+        .ok_or_else(|| "Sign in first".to_string())
+}
+
+/// Deletes synced history from the server and from every device: everything
+/// (`before` = None) or what was recorded before a day, for all devices or
+/// one. Returns how many records the server removed.
+pub fn delete_history(
+    handle: &SyncHandle,
+    conn: &Connection,
+    before: Option<&str>,
+    device: Option<&str>,
+) -> Result<u64, String> {
+    let key = account_key(handle)?;
+    let before_day = match before {
+        Some(d) => Some(chrono::NaiveDate::parse_from_str(d, db::DAY_FMT).map_err(|_| "Bad date")?),
+        None => None,
+    };
+    let now = now();
+    let until = before_day
+        .map(|d| db::fmt_time(d.and_time(chrono::NaiveTime::MIN)))
+        .unwrap_or_else(|| db::fmt_time(now));
+    // The server works in whole days: "everything" means up to and including today.
+    let server_before = before_day
+        .unwrap_or(now.date() + chrono::Duration::days(1))
+        .format(db::DAY_FMT)
+        .to_string();
+    let me = device_id(conn).map_err(|e| e.to_string())?;
+    let hlc = format!("{}:0:{me}", chrono::Utc::now().timestamp_millis());
+    let purge = Envelope::seal(
+        &key,
+        &focustrack_sync_proto::new_id(),
+        kind::PURGE,
+        &me,
+        &today(),
+        1,
+        Some(hlc),
+        false,
+        &json!({ "until": until, "device": device }),
+    );
+    // Tell the other devices first, then clear the server, then this device.
+    call(handle, conn, |c| c.push(std::slice::from_ref(&purge))).map_err(|e| e.to_string())?;
+    let deleted = call(handle, conn, |c| c.delete_data(&server_before, device))
+        .map_err(|e| e.to_string())?
+        .deleted;
+    db::set_setting(conn, "sync_applying", "1").map_err(|e| e.to_string())?;
+    let local = purge_local(conn, &until, device);
+    db::set_setting(conn, "sync_applying", "0").map_err(|e| e.to_string())?;
+    local.map_err(|e| e.to_string())?;
+    Ok(deleted)
+}
+
+/// Deletes the account and all its cloud data, then signs this device out
+/// (its own local history stays). Needs the password again.
+pub fn delete_account(
+    handle: &SyncHandle,
+    conn: &Connection,
+    password: &str,
+) -> Result<(), String> {
+    let email = setting(conn, "sync_email").ok_or("Sign in first")?;
+    // Make sure we hold a fresh access token, so a 401 below means "wrong password".
+    call(handle, conn, |c| c.account()).map_err(|e| e.to_string())?;
+    let mut c = client_for(conn).map_err(|e| e.to_string())?;
+    c.set_access_token(handle.access.lock().ok().and_then(|a| a.clone()));
+    let params = c.auth_params(&email).map_err(|e| e.to_string())?;
+    let master =
+        focustrack_sync_proto::crypto::MasterKey::derive(password, &params.salt, &params.kdf)
+            .map_err(|e| e.to_string())?;
+    match c.delete_account(&master.auth_key()) {
+        Ok(_) => {}
+        Err(e) if e.status() == Some(401) => return Err("Wrong password".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+    sign_out(handle, conn)
+}
+
+/// Days of history the server keeps (None = forever).
+pub fn retention(handle: &SyncHandle, conn: &Connection) -> Result<Option<u32>, String> {
+    call(handle, conn, |c| c.account())
+        .map(|a| a.retention_days)
+        .map_err(|e| e.to_string())
+}
+
+pub fn set_retention(
+    handle: &SyncHandle,
+    conn: &Connection,
+    days: Option<u32>,
+) -> Result<Option<u32>, String> {
+    call(handle, conn, |c| c.set_retention(days))
+        .map(|a| a.retention_days)
+        .map_err(|e| e.to_string())
+}
+
+/// Downloads everything stored in the account, decrypts it and writes it as
+/// JSON to `path`. Returns how many records were written.
+pub fn export(handle: &SyncHandle, conn: &Connection, path: &Path) -> Result<usize, String> {
+    let key = account_key(handle)?;
+    let mut since = 0;
+    let mut records = Vec::new();
+    loop {
+        let page = call(handle, conn, |c| c.pull_all(since, BATCH)).map_err(|e| e.to_string())?;
+        for env in page.records {
+            let body: Value = env.open(&key).unwrap_or(Value::Null);
+            records.push(json!({
+                "id": env.id, "kind": env.kind, "device": env.device, "day": env.day,
+                "version": env.version, "deleted": env.deleted, "data": body,
+            }));
+        }
+        since = page.cursor;
+        if !page.more {
+            break;
+        }
+    }
+    let doc = json!({
+        "app": "FocusTrack",
+        "exported": db::fmt_time(now()),
+        "account": setting(conn, "sync_email"),
+        "records": records,
+    });
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+    Ok(records.len())
 }
 
 pub fn rename_device(handle: &SyncHandle, conn: &Connection, name: &str) -> Result<(), String> {
@@ -1503,8 +2203,7 @@ mod tests {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();
                 let conn = focustrack_server::store::open(":memory:").unwrap();
-                let app =
-                    focustrack_server::app(conn, focustrack_server::Config { trust_proxy: false });
+                let app = focustrack_server::app(conn, focustrack_server::Config::default());
                 focustrack_server::serve(listener, app, std::future::pending())
                     .await
                     .unwrap();
@@ -1539,6 +2238,19 @@ mod tests {
 
     fn at((h, m): (u32, u32)) -> NaiveDateTime {
         Local::now().date_naive().and_hms_opt(h, m, 0).unwrap()
+    }
+
+    /// Today's (hour, minute) `mins` minutes ago (00:00 just after midnight),
+    /// for tests that need usage before "now".
+    fn earlier(mins: i64) -> (u32, u32) {
+        use chrono::Timelike;
+        let now = Local::now().naive_local();
+        let t = now - chrono::Duration::minutes(mins);
+        if t.date() < now.date() {
+            (0, 0)
+        } else {
+            (t.hour(), t.minute())
+        }
     }
 
     impl Device {
@@ -1831,6 +2543,617 @@ mod tests {
         ] {
             assert!(check_server(bad).is_err(), "{bad}");
         }
+    }
+
+    fn usage_count(d: &Device) -> i64 {
+        d.count("SELECT COUNT(*) FROM usage_sessions")
+    }
+
+    #[test]
+    fn deleting_all_history_reaches_every_device() {
+        let (mut a, mut b) = pair();
+        // Before "now": deleting everything removes what started before now.
+        a.use_app("code.exe", earlier(40), earlier(10));
+        b.use_app("steam.exe", earlier(40), earlier(30));
+        a.sync();
+        b.sync();
+        a.sync();
+        assert_eq!((usage_count(&a), usage_count(&b)), (2, 2));
+
+        let removed = delete_history(&a.handle, &a.conn, None, None).unwrap();
+        assert_eq!(removed, 2, "both devices' records left the server");
+        assert_eq!(usage_count(&a), 0);
+        b.sync();
+        assert_eq!(usage_count(&b), 0, "B applied the purge");
+        // A new device gets nothing back.
+        let c = device();
+        let url = setting(&a.conn, "sync_server").unwrap();
+        sign_in(
+            &c.handle,
+            &c.conn,
+            &url,
+            "sam@example.com",
+            "a long password",
+            "New",
+        )
+        .unwrap();
+        let mut c = c;
+        c.sync();
+        assert_eq!(usage_count(&c), 0);
+        // Tracking carries on afterwards.
+        b.use_app("steam.exe", (11, 0), (11, 5));
+        b.sync();
+        a.sync();
+        assert_eq!(usage_count(&a), 1);
+    }
+
+    #[test]
+    fn deleting_one_devices_history_or_older_history() {
+        let (mut a, mut b) = pair();
+        // Before "now": deleting everything removes what started before now.
+        a.use_app("code.exe", earlier(40), earlier(10));
+        b.use_app("steam.exe", earlier(40), earlier(30));
+        a.sync();
+        b.sync();
+        a.sync();
+        // Only B's history.
+        delete_history(&a.handle, &a.conn, None, Some(&b.id())).unwrap();
+        assert_eq!(
+            a.count(&format!(
+                "SELECT COUNT(*) FROM usage_sessions WHERE device_id = '{}'",
+                b.id()
+            )),
+            0
+        );
+        assert_eq!(usage_count(&a), 1, "A's own history stays");
+        b.sync();
+        assert_eq!(usage_count(&b), 1, "B keeps only A's session");
+
+        // History before today: nothing recorded today is touched.
+        let today = Local::now().date_naive().format(db::DAY_FMT).to_string();
+        assert_eq!(
+            delete_history(&a.handle, &a.conn, Some(&today), None).unwrap(),
+            0
+        );
+        assert_eq!(usage_count(&a), 1);
+    }
+
+    #[test]
+    fn deleting_the_account_needs_the_password_and_signs_everyone_out() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        a.sync();
+        assert_eq!(
+            delete_account(&a.handle, &a.conn, "wrong").err().unwrap(),
+            "Wrong password"
+        );
+        delete_account(&a.handle, &a.conn, "a long password").unwrap();
+        assert!(!a.handle.signed_in());
+        assert_eq!(usage_count(&a), 1, "local history stays");
+        assert!(matches!(
+            sync_once(&b.handle, &mut b.conn),
+            Err(SyncError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn export_writes_everything_decrypted() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        b.use_app("steam.exe", (9, 0), (9, 10));
+        a.sync();
+        b.sync();
+        let path = a.handle.data_dir.join("export.json");
+        let n = export(&a.handle, &a.conn, &path).unwrap();
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let usage: Vec<&Value> = doc["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "usage")
+            .collect();
+        assert_eq!(usage.len(), 2, "this device's own records too");
+        assert!(usage.iter().any(|r| r["data"]["exe"] == "code.exe"));
+        assert!(n >= 4, "usage plus the two device records");
+    }
+
+    #[test]
+    fn retention_round_trips() {
+        let (a, _b) = pair();
+        assert_eq!(retention(&a.handle, &a.conn).unwrap(), None);
+        assert_eq!(
+            set_retention(&a.handle, &a.conn, Some(365)).unwrap(),
+            Some(365)
+        );
+        assert_eq!(retention(&a.handle, &a.conn).unwrap(), Some(365));
+        assert!(set_retention(&a.handle, &a.conn, Some(3)).is_err());
+    }
+
+    #[test]
+    fn devices_report_status_and_can_be_controlled_remotely() {
+        let (mut a, mut b) = pair();
+        a.use_app("code.exe", (9, 0), (9, 30));
+        a.sync();
+        b.sync();
+        let rows = devices(&b.handle, &b.conn).unwrap();
+        let laptop = rows.iter().find(|d| d.name == "Laptop").unwrap();
+        assert!(laptop.online && !laptop.paused && !laptop.sync_disabled);
+        assert!(
+            laptop
+                .last_activity
+                .as_deref()
+                .is_some_and(|t| t.ends_with("09:30:00")),
+            "{laptop:?}"
+        );
+
+        // B pauses tracking on A; A applies it at its next sync and reports it back.
+        set_device_control(&b.handle, &b.conn, &a.id(), Some(true), None).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(
+            setting(&a.conn, "paused").as_deref(),
+            Some("1"),
+            "A is paused now"
+        );
+        a.sync(); // publishes its new status
+        b.sync();
+        let rows = devices(&b.handle, &b.conn).unwrap();
+        assert!(
+            rows.iter().find(|d| d.name == "Laptop").unwrap().paused,
+            "B sees A as paused"
+        );
+
+        // ...and resumes it.
+        set_device_control(&b.handle, &b.conn, &a.id(), Some(false), None).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(setting(&a.conn, "paused").as_deref(), Some("0"));
+
+        // B turns sync off on A: A stops syncing (only A can turn it back on).
+        set_device_control(&b.handle, &b.conn, &a.id(), None, Some(false)).unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(setting(&a.conn, "sync_enabled").as_deref(), Some("0"));
+        assert!(devices(&b.handle, &b.conn)
+            .unwrap()
+            .iter()
+            .any(|d| d.name == "Laptop" && d.sync_disabled));
+    }
+
+    #[test]
+    fn a_limit_for_all_devices_counts_every_devices_usage() {
+        let (mut a, mut b) = pair();
+        // A: 1-hour youtube.com limit across devices; 35 min on YouTube in the browser.
+        let yt = db::get_or_create_website(&a.conn, "youtube.com", at((8, 0))).unwrap();
+        a.conn
+            .execute(
+                "INSERT INTO usage_limits (target_type, target_id, daily_limit_secs, action, reach)
+                 VALUES ('website', ?1, 3600, 'block', 'all')",
+                params![yt],
+            )
+            .unwrap();
+        let w = db::insert_website_session(&a.conn, yt, "chrome", at((9, 0))).unwrap();
+        db::update_span(&a.conn, db::SpanKind::Website, w, at((9, 0)), at((9, 35))).unwrap();
+        // B (a phone): 25 min in the YouTube app.
+        b.use_app("com.google.android.youtube", (10, 0), (10, 25));
+        a.sync();
+        b.sync();
+        a.sync();
+
+        for (name, d) in [("A", &a), ("B", &b)] {
+            let l = &crate::limits::current_status(&d.conn, at((11, 0))).unwrap()[0];
+            assert_eq!(l.reach, "all", "{name}: the setting synced");
+            assert_eq!(l.used_secs, 60 * 60, "{name}: 35 + 25 minutes");
+            assert!(l.exceeded(), "{name}");
+        }
+        let la = &crate::limits::current_status(&a.conn, at((11, 0))).unwrap()[0];
+        assert_eq!(
+            la.others_secs,
+            25 * 60,
+            "A sees how much came from other devices"
+        );
+
+        // Back to this device only: B's usage no longer counts on A.
+        thread::sleep(Duration::from_millis(5));
+        a.conn
+            .execute("UPDATE usage_limits SET reach = 'device'", [])
+            .unwrap();
+        let la = &crate::limits::current_status(&a.conn, at((11, 0))).unwrap()[0];
+        assert_eq!((la.used_secs, la.others_secs), (35 * 60, 0));
+    }
+
+    fn profile(name: &str, sites: &[&str]) -> crate::profiles::Profile {
+        crate::profiles::Profile {
+            id: None,
+            name: name.into(),
+            mode: "block".into(),
+            categories: vec!["Gaming".into()],
+            apps: vec![],
+            sites: sites.iter().map(|s| s.to_string()).collect(),
+            unblock_on_breaks: false,
+            end_early: "confirm".into(),
+            builtin: false,
+        }
+    }
+
+    fn profile_sites(d: &Device, name: &str) -> String {
+        d.conn
+            .query_row(
+                "SELECT sites FROM block_profiles WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn category_of(d: &Device, sql: &str) -> Option<String> {
+        d.conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn profiles_and_categories_sync_both_ways() {
+        let (mut a, mut b) = pair();
+        // Untouched built-in profiles aren't pushed, and never duplicate.
+        assert_eq!(
+            a.count("SELECT COUNT(*) FROM block_profiles WHERE version > synced_version"),
+            0
+        );
+
+        // A: a new profile, an app and a website put in other categories.
+        crate::profiles::save(&a.conn, &profile("Exams", &["reddit.com"])).unwrap();
+        a.use_app("Discord.exe", (9, 0), (9, 10));
+        a.conn
+            .execute(
+                "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Gaming')
+                 WHERE exe_name = 'Discord.exe'",
+                [],
+            )
+            .unwrap();
+        let w = db::get_or_create_website(&a.conn, "news.ycombinator.com", at((9, 0))).unwrap();
+        a.conn
+            .execute(
+                "UPDATE websites SET category_id = (SELECT id FROM categories WHERE name = 'Entertainment') WHERE id = ?1",
+                params![w],
+            )
+            .unwrap();
+        a.sync();
+        b.sync();
+        assert_eq!(profile_sites(&b, "Exams"), r#"["reddit.com"]"#);
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles"),
+            5,
+            "4 built-in + Exams"
+        );
+        let app_cat = "SELECT c.name FROM applications a JOIN categories c ON c.id = a.category_id
+                       WHERE a.exe_name = 'Discord.exe'";
+        let site_cat = "SELECT c.name FROM websites w JOIN categories c ON c.id = w.category_id
+                        WHERE w.domain = 'news.ycombinator.com'";
+        assert_eq!(category_of(&b, app_cat).as_deref(), Some("Gaming"));
+        assert_eq!(category_of(&b, site_cat).as_deref(), Some("Entertainment"));
+        // Applying didn't make B push the same changes back.
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM applications WHERE cat_version > cat_synced"),
+            0
+        );
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles WHERE version > synced_version"),
+            0
+        );
+
+        // B: edits a built-in profile and moves the app again; A gets both.
+        thread::sleep(Duration::from_millis(5));
+        b.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"x.com\"]' WHERE name = 'Study Mode'",
+                [],
+            )
+            .unwrap();
+        b.conn
+            .execute(
+                "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Communication')
+                 WHERE exe_name = 'Discord.exe'",
+                [],
+            )
+            .unwrap();
+        b.sync();
+        a.sync();
+        assert_eq!(profile_sites(&a, "Study Mode"), r#"["x.com"]"#);
+        assert_eq!(category_of(&a, app_cat).as_deref(), Some("Communication"));
+
+        // Deleting a profile on A deletes it on B.
+        let id: i64 = a
+            .conn
+            .query_row(
+                "SELECT id FROM block_profiles WHERE name = 'Exams'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::profiles::delete(&a.conn, id).unwrap();
+        a.sync();
+        b.sync();
+        assert_eq!(
+            b.count("SELECT COUNT(*) FROM block_profiles WHERE name = 'Exams'"),
+            0
+        );
+    }
+
+    #[test]
+    fn offline_edits_to_profiles_resolve_without_losing_either() {
+        let (mut a, mut b) = pair();
+        // Both edit the same profile while offline: the later edit wins on both.
+        a.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"a.com\"]' WHERE name = 'Work Mode'",
+                [],
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+        b.conn
+            .execute(
+                "UPDATE block_profiles SET sites = '[\"b.com\"]' WHERE name = 'Work Mode'",
+                [],
+            )
+            .unwrap();
+        // Both make a profile with the same name: both are kept.
+        crate::profiles::save(&a.conn, &profile("Exams", &["a.com"])).unwrap();
+        crate::profiles::save(&b.conn, &profile("Exams", &["b.com"])).unwrap();
+        a.sync();
+        b.sync();
+        a.sync();
+        for (n, d) in [("A", &a), ("B", &b)] {
+            assert_eq!(profile_sites(d, "Work Mode"), r#"["b.com"]"#, "{n}");
+            assert_eq!(
+                d.count("SELECT COUNT(*) FROM block_profiles WHERE name LIKE 'Exams%'"),
+                2,
+                "{n}"
+            );
+        }
+        assert_eq!(profile_sites(&a, "Exams (2)"), r#"["b.com"]"#);
+        assert_eq!(profile_sites(&b, "Exams (2)"), r#"["a.com"]"#);
+    }
+
+    fn focus_plan() -> crate::focus::FocusPlan {
+        crate::focus::FocusPlan {
+            label: "Revision".into(),
+            focus_mins: 50,
+            break_mins: 10,
+            long_break_mins: 0,
+            rounds: 2,
+            profile_id: None,
+            mode: "focus".into(),
+            subject: None,
+            goal_text: None,
+            goal_id: None,
+        }
+    }
+
+    #[test]
+    fn a_focus_session_runs_on_both_devices_and_ends_on_both() {
+        use crate::focus;
+        let (mut a, mut b) = pair();
+        let (sa, sb) = (
+            crate::tracker::Shared::new(false, 300),
+            crate::tracker::Shared::new(false, 300),
+        );
+        let study: i64 = a
+            .conn
+            .query_row(
+                "SELECT id FROM block_profiles WHERE name = 'Study Mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let st = focus::start(
+            &a.conn,
+            &sa,
+            focus::FocusPlan {
+                profile_id: Some(study),
+                ..focus_plan()
+            },
+            vec!["*".into()],
+        )
+        .unwrap();
+        assert!(st.run.as_ref().is_some_and(|r| !r.joined));
+        assert!(focus_run_active(&a.conn));
+        a.sync();
+        b.sync();
+
+        // B joins: same session, same profile, blocking on; no second history row.
+        let (title, _) = focus::follow_runs(&b.conn, &sb, now())
+            .unwrap()
+            .expect("joined");
+        assert!(title.contains("Laptop"), "{title}");
+        let fb = focus::status(&sb).unwrap();
+        assert_eq!((fb.label.as_str(), fb.round, fb.rounds), ("Revision", 1, 2));
+        assert_eq!(fb.profile_name.as_deref(), Some("Study Mode"));
+        assert!(fb.blocking);
+        assert!(fb.run.as_ref().is_some_and(|r| r.joined));
+        assert_eq!(fb.plan_ends_at, st.plan_ends_at);
+        assert_eq!(
+            b.count(&format!(
+                "SELECT COUNT(*) FROM focus_sessions WHERE device_id = {}",
+                db::OWN_DEVICE
+            )),
+            0
+        );
+        assert!(
+            focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none(),
+            "joins once"
+        );
+
+        // B ends it early (Study Mode asks for the phrase); A's session ends too.
+        assert!(
+            focus::stop(&b.conn, &sb, None).is_err(),
+            "the profile's rules apply"
+        );
+        focus::stop(&b.conn, &sb, Some(focus::STOP_PHRASE)).unwrap();
+        assert!(
+            focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none(),
+            "no rejoining"
+        );
+        b.sync();
+        a.sync();
+        let (_, body) = focus::follow_runs(&a.conn, &sa, now())
+            .unwrap()
+            .expect("ended");
+        assert!(body.contains("ended on another device"), "{body}");
+        assert!(focus::status(&sa).is_none());
+        assert_eq!(
+            a.count(
+                "SELECT COUNT(*) FROM focus_sessions WHERE end_time IS NOT NULL AND completed = 0"
+            ),
+            1,
+            "recorded once, as ended early"
+        );
+        assert!(!focus_run_active(&a.conn));
+    }
+
+    #[test]
+    fn a_focus_session_for_other_devices_leaves_this_one_alone() {
+        use crate::focus;
+        let (mut a, mut b) = pair();
+        let sb = crate::tracker::Shared::new(false, 300);
+        let sa = crate::tracker::Shared::new(false, 300);
+        focus::start(&a.conn, &sa, focus_plan(), vec!["some-other-device".into()]).unwrap();
+        a.sync();
+        b.sync();
+        assert!(focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none());
+        // B is busy with its own session: a run for it waits.
+        focus::stop(&a.conn, &sa, None).unwrap();
+        focus::start(&b.conn, &sb, focus_plan(), vec![]).unwrap();
+        focus::start(&a.conn, &sa, focus_plan(), vec![b.id()]).unwrap();
+        a.sync();
+        b.sync();
+        assert!(focus::follow_runs(&b.conn, &sb, now()).unwrap().is_none());
+        assert!(focus::status(&sb).unwrap().run.is_none());
+    }
+
+    #[test]
+    fn goals_combine_devices_and_notify_once() {
+        let (mut a, mut b) = pair();
+        // "Study at least 1 hour", made on the laptop.
+        a.conn
+            .execute(
+                "INSERT INTO goals (kind, category_id, target, enabled)
+                 VALUES ('min_category', (SELECT id FROM categories WHERE name = 'Study'), 3600, 1)",
+                [],
+            )
+            .unwrap();
+        // 40 minutes of Anki on the laptop, 30 on the phone.
+        let study = "UPDATE applications SET category_id = (SELECT id FROM categories WHERE name = 'Study')";
+        a.use_app("anki.exe", (9, 0), (9, 40));
+        a.conn.execute(study, []).unwrap();
+        b.use_app("com.ichi2.anki", (10, 0), (10, 30));
+        b.conn.execute(study, []).unwrap();
+        a.sync();
+        b.sync();
+        a.sync();
+
+        let day = today();
+        for (n, d) in [("A", &a), ("B", &b)] {
+            let g = &crate::goals::goal_status(&d.conn, &day).unwrap()[0];
+            assert_eq!(
+                (g.current, g.state.as_str()),
+                (70 * 60, "achieved"),
+                "{n}: combined"
+            );
+            let parts: Vec<(&str, i64)> = g
+                .by_device
+                .iter()
+                .map(|p| (p.name.as_str(), p.current))
+                .collect();
+            assert_eq!(
+                parts,
+                [("Laptop", 40 * 60), ("Desktop", 30 * 60)],
+                "{n}: per device"
+            );
+        }
+
+        // The "goal achieved" notification: shown on the first device only.
+        let g = &crate::goals::goal_status(&a.conn, &day).unwrap()[0];
+        let (key, _, _) = crate::goals::goal_notice(g).unwrap();
+        let shared = format!("goal:{}:achieved", g.uuid);
+        assert!(db::mark_notified_everywhere(&a.conn, &key, &shared, &day).unwrap());
+        assert!(!db::mark_notified_everywhere(&a.conn, &key, &shared, &day).unwrap());
+        a.sync();
+        b.sync();
+        let gb = &crate::goals::goal_status(&b.conn, &day).unwrap()[0];
+        let (key_b, _, _) = crate::goals::goal_notice(gb).unwrap();
+        assert!(
+            !db::mark_notified_everywhere(
+                &b.conn,
+                &key_b,
+                &format!("goal:{}:achieved", gb.uuid),
+                &day
+            )
+            .unwrap(),
+            "the phone doesn't repeat it"
+        );
+    }
+
+    #[test]
+    fn the_same_app_on_two_platforms_adds_up_and_devices_compare() {
+        use crate::analytics as an;
+        let (mut a, mut b) = pair();
+        a.use_app("chrome.exe", (9, 0), (9, 30));
+        a.use_app("Code.exe", (10, 0), (11, 0));
+        b.use_app("com.android.chrome", (12, 0), (12, 20));
+        b.use_app("com.whatsapp", (13, 0), (13, 5));
+        a.sync();
+        b.sync();
+        a.sync();
+
+        let day = today();
+        let apps = an::app_usage(&a.conn, &day, &day).unwrap();
+        let rows = an::combine_apps(&a.conn, apps, &day, &day).unwrap();
+        let used: Vec<(&str, i64, usize)> = rows
+            .iter()
+            .filter(|r| r.secs > 0)
+            .map(|r| (r.name.as_str(), r.secs, r.members.len()))
+            .collect();
+        assert_eq!(
+            used,
+            [
+                ("Code.exe", 3600, 1),
+                ("Chrome", 50 * 60, 2),
+                ("WhatsApp", 5 * 60, 1)
+            ]
+            .map(|(n, s, m)| (if n == "WhatsApp" { "com.whatsapp" } else { n }, s, m)),
+            "one Chrome total; apps without a match stay per platform"
+        );
+        let chrome = rows.iter().find(|r| r.name == "Chrome").unwrap();
+        let parts: Vec<(&str, i64)> = chrome
+            .devices
+            .iter()
+            .map(|d| (d.name.as_str(), d.secs))
+            .collect();
+        assert_eq!(parts, [("Laptop", 30 * 60), ("Desktop", 20 * 60)]);
+
+        // One device at a time: no merging across platforms needed, only its own part.
+        let ids = an::device_filter(&a.conn, Some(&b.id())).unwrap();
+        let _v = db::device_view(&a.conn, ids.as_deref()).unwrap();
+        let apps = an::app_usage(&a.conn, &day, &day).unwrap();
+        let rows = an::combine_apps(&a.conn, apps, &day, &day).unwrap();
+        let c = rows.iter().find(|r| r.name == "Chrome").unwrap();
+        assert_eq!((c.secs, c.devices.len()), (20 * 60, 1));
+        drop(_v);
+
+        let d = chrono::Local::now().date_naive();
+        let cmp = an::compare_devices(&a.conn, d, d).unwrap();
+        let got: Vec<(&str, i64, Option<&str>)> = cmp
+            .iter()
+            .map(|x| (x.name.as_str(), x.active_secs, x.top_app.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Laptop", 90 * 60, Some("Code.exe")),
+                ("Desktop", 25 * 60, Some("com.android.chrome"))
+            ]
+        );
+        // The comparison leaves no device view behind.
+        assert_eq!(an::totals(&a.conn, &day, &day).unwrap().0, 115 * 60);
     }
 
     #[test]

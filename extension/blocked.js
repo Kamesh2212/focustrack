@@ -16,3 +16,22 @@ if (reason === "focus") {
     : "You're in a FocusTrack focus session. Distracting sites are blocked until it ends.";
   document.getElementById("how").textContent = "To end the session early, open FocusTrack → Focus Mode.";
 }
+
+// A motivational quote from FocusTrack (#49). The app keeps the list and
+// avoids repeats; nothing is shown when it's off, unreachable or has none.
+(async () => {
+  try {
+    const res = await fetch("http://127.0.0.1:17865/v1/quote", {
+      headers: { "X-FocusTrack": "1" },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return;
+    const q = await res.json();
+    if (!q || !q.text || !q.author) return;
+    document.getElementById("quote-text").textContent = `“${q.text}”`;
+    document.getElementById("quote-author").textContent = `— ${q.author}`;
+    document.getElementById("quote").hidden = false;
+  } catch {
+    /* no quote */
+  }
+})();

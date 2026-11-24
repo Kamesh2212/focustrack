@@ -14,6 +14,10 @@ pub const DAY_FMT: &str = "%Y-%m-%d";
 
 pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 300;
 
+/// The newest schema version `migrate` produces.
+#[cfg(test)]
+pub const SCHEMA_VERSION: i64 = 11;
+
 pub fn fmt_time(t: NaiveDateTime) -> String {
     t.format(TIME_FMT).to_string()
 }
@@ -223,6 +227,90 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v6(conn)?;
     }
 
+    if version < 7 {
+        // Device management (#66): what other devices report about themselves,
+        // and remote controls (pause tracking, sync on/off) for each device.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE devices ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE devices ADD COLUMN sync_error TEXT;
+             CREATE TABLE IF NOT EXISTS device_controls (
+                 target         TEXT PRIMARY KEY,
+                 uuid           TEXT NOT NULL UNIQUE,
+                 pause_tracking INTEGER NOT NULL DEFAULT 0,
+                 sync_enabled   INTEGER NOT NULL DEFAULT 1,
+                 hlc            TEXT NOT NULL,
+                 version        INTEGER NOT NULL DEFAULT 1,
+                 synced_version INTEGER NOT NULL DEFAULT 0
+             );
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 8 {
+        // Cross-device limits (#70): `device` counts this device's usage, `all`
+        // every synced device's.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE usage_limits ADD COLUMN reach TEXT NOT NULL DEFAULT 'device';
+             PRAGMA user_version = 8;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 9 {
+        migrate_v9(conn)?;
+    }
+
+    if version < 10 {
+        // Focus sessions shared between devices (#71). Times are Unix seconds,
+        // so devices in other time zones agree.
+        let sql = format!(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS focus_runs (
+                 id              INTEGER PRIMARY KEY,
+                 plan            TEXT NOT NULL,
+                 profile_uuid    TEXT,
+                 start_utc       INTEGER NOT NULL,
+                 planned_end_utc INTEGER NOT NULL,
+                 devices         TEXT NOT NULL DEFAULT '[]',
+                 origin          TEXT NOT NULL,
+                 ended_utc       INTEGER,
+                 ended_early     INTEGER NOT NULL DEFAULT 0
+             );
+             {}
+             PRAGMA user_version = 10;
+             COMMIT;",
+            sync_table_sql("focus_runs", true)
+        );
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+
+    if version < 11 {
+        // Notifications shown on one device and not repeated on the others (#72).
+        let sql = format!(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS shared_notices (
+                 id  INTEGER PRIMARY KEY,
+                 key TEXT NOT NULL,
+                 day TEXT NOT NULL,
+                 UNIQUE (key, day)
+             );
+             {}
+             PRAGMA user_version = 11;
+             COMMIT;",
+            sync_table_sql("shared_notices", true)
+        );
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+
     // A focus session left open by a crash or shutdown ends where it was last
     // saved — except the one about to be resumed (#12), which focus.rs handles.
     conn.execute(
@@ -244,7 +332,22 @@ pub const OWNED_TABLES: &[&str] = &[
     "focus_sessions",
 ];
 /// Tables any device may edit; the newest edit (by `hlc`) wins.
-pub const SHARED_TABLES: &[&str] = &["usage_limits", "goals", "goal_checks"];
+pub const SHARED_TABLES: &[&str] = &[
+    "usage_limits",
+    "goals",
+    "goal_checks",
+    "block_profiles",
+    "focus_runs",
+    "shared_notices",
+];
+
+/// The built-in blocking profiles, as first created (schema v4).
+const BUILTIN_PROFILES: &str = "           ('Study Mode', 'block', '[\"Gaming\",\"Entertainment\",\"Social Media\"]', '[]', '[]', 'confirm', 1),
+           ('Work Mode', 'block', '[\"Gaming\",\"Entertainment\"]', '[]',
+              '[\"reddit.com\",\"instagram.com\",\"tiktok.com\",\"x.com\",\"twitter.com\",\"facebook.com\"]', 'allow', 1),
+           ('Deep Focus', 'allow_only', '[\"Study\",\"Education\",\"Development\",\"Productivity\"]', '[]',
+              '[\"google.com\",\"bing.com\",\"duckduckgo.com\",\"search.brave.com\",\"wikipedia.org\",\"stackoverflow.com\",\"github.com\"]', 'strict', 1),
+           ('Personal', 'block', '[]', '[]', '[]', 'confirm', 1)";
 
 /// SQL for "this device's ID".
 pub const OWN_DEVICE: &str = "(SELECT value FROM user_settings WHERE key = 'device_id')";
@@ -274,7 +377,6 @@ fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
     if get_setting(conn, "device_id")?.is_none() {
         set_setting(conn, "device_id", &focustrack_sync_proto::new_id())?;
     }
-    let hlc = sql_hlc();
     let mut sql = String::from(
         "BEGIN;
          CREATE TABLE IF NOT EXISTS devices (
@@ -296,7 +398,79 @@ fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
     for (table, shared) in OWNED_TABLES
         .iter()
         .map(|t| (*t, false))
-        .chain(SHARED_TABLES.iter().map(|t| (*t, true)))
+        .chain(["usage_limits", "goals", "goal_checks"].map(|t| (t, true)))
+    {
+        sql += &sync_table_sql(table, shared);
+    }
+    // History older than 35 days isn't uploaded (design D7); mark it as synced.
+    for table in OWNED_TABLES {
+        sql += &format!(
+            "UPDATE {table} SET synced_version = version WHERE day < date('now', 'localtime', '-35 days');"
+        );
+    }
+    sql += "PRAGMA user_version = 6; COMMIT;";
+    let result = conn.execute_batch(&sql);
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    result
+}
+
+/// Schema v9 (#62): blocking profiles sync, and so does the category the user
+/// picks for an app or website.
+fn migrate_v9(conn: &Connection) -> rusqlite::Result<()> {
+    let hlc = sql_hlc();
+    let mut sql = String::from("BEGIN;");
+    sql += &sync_table_sql("block_profiles", true);
+    // A built-in profile is the same record on every device. Untouched ones
+    // carry the oldest clock and count as synced, so a real edit on any
+    // device wins and a newly upgraded device doesn't undo it.
+    let builtins: Vec<String> = conn
+        .prepare("SELECT name FROM block_profiles WHERE builtin = 1")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for name in builtins {
+        let id = focustrack_sync_proto::name_id("profile", &name);
+        sql += &format!(
+            "UPDATE block_profiles SET uuid = '{id}' WHERE builtin = 1 AND name = '{}';",
+            name.replace('\'', "''")
+        );
+    }
+    sql += &format!(
+        "CREATE TEMP TABLE seed_profiles (name, mode, categories, apps, sites, end_early, builtin);
+         INSERT INTO seed_profiles VALUES {BUILTIN_PROFILES};
+         UPDATE block_profiles SET hlc = '0:0:' || {OWN_DEVICE}, synced_version = version
+         WHERE builtin = 1 AND unblock_on_breaks = 0 AND EXISTS (
+             SELECT 1 FROM seed_profiles s WHERE s.name = block_profiles.name AND s.mode = block_profiles.mode
+               AND s.categories = block_profiles.categories AND s.apps = block_profiles.apps
+               AND s.sites = block_profiles.sites AND s.end_early = block_profiles.end_early);
+         DROP TABLE seed_profiles;"
+    );
+    // The category the user chose for an app or site: its own clock and version.
+    for table in ["applications", "websites"] {
+        sql += &format!(
+            "ALTER TABLE {table} ADD COLUMN cat_hlc TEXT;
+             ALTER TABLE {table} ADD COLUMN cat_version INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE {table} ADD COLUMN cat_synced INTEGER NOT NULL DEFAULT 0;
+             CREATE TRIGGER IF NOT EXISTS {table}_cat_upd AFTER UPDATE OF category_id ON {table}
+               WHEN NEW.category_id IS NOT OLD.category_id AND {NOT_APPLYING}
+             BEGIN
+               UPDATE {table} SET cat_version = OLD.cat_version + 1, cat_hlc = {hlc} WHERE rowid = NEW.rowid;
+             END;"
+        );
+    }
+    sql += "PRAGMA user_version = 9; COMMIT;";
+    let result = conn.execute_batch(&sql);
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    result
+}
+
+/// Sync columns and triggers for one table (see `migrate_v6`).
+fn sync_table_sql(table: &str, shared: bool) -> String {
+    let hlc = sql_hlc();
+    let mut sql = String::new();
     {
         sql += &format!(
             "ALTER TABLE {table} ADD COLUMN uuid TEXT;
@@ -341,6 +515,9 @@ fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
             let kind = match table {
                 "usage_limits" => "limit",
                 "goals" => "goal",
+                "block_profiles" => "profile",
+                "focus_runs" => "focus_run",
+                "shared_notices" => "notice",
                 _ => "goal_check",
             };
             sql += &format!(
@@ -353,18 +530,7 @@ fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
             );
         }
     }
-    // History older than 35 days isn't uploaded (design D7); mark it as synced.
-    for table in OWNED_TABLES {
-        sql += &format!(
-            "UPDATE {table} SET synced_version = version WHERE day < date('now', 'localtime', '-35 days');"
-        );
-    }
-    sql += "PRAGMA user_version = 6; COMMIT;";
-    let result = conn.execute_batch(&sql);
-    if result.is_err() {
-        let _ = conn.execute_batch("ROLLBACK;");
-    }
-    result
+    sql
 }
 
 /// Study category and mode, limit actions/overrides, custom goals, blocking
@@ -758,6 +924,26 @@ pub fn mark_notified(conn: &Connection, key: &str, day: &str) -> rusqlite::Resul
     Ok(n == 1)
 }
 
+/// Like `mark_notified`, but also for every other synced device: false if
+/// this device or another one already showed it (`shared_key` names it the
+/// same way on every device).
+pub fn mark_notified_everywhere(
+    conn: &Connection,
+    key: &str,
+    shared_key: &str,
+    day: &str,
+) -> rusqlite::Result<bool> {
+    if !mark_notified(conn, key, day)? {
+        return Ok(false);
+    }
+    let id = focustrack_sync_proto::name_id("notice", &format!("{shared_key}|{day}"));
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO shared_notices (key, day, uuid) VALUES (?1, ?2, ?3)",
+        params![shared_key, day, id],
+    )?;
+    Ok(n == 1)
+}
+
 pub fn clear_limit_notifications(conn: &Connection, limit_id: i64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM sent_notifications WHERE key LIKE ?1",
@@ -939,7 +1125,56 @@ mod tests {
             )
             .unwrap();
         println!("schema v{v}: {rows} usage rows (before {before}), {with_ids} with ids, {pending} to upload");
-        assert_eq!((v, rows, with_ids), (6, before, before));
+        assert_eq!((v, rows, with_ids), (SCHEMA_VERSION, before, before));
+    }
+
+    #[test]
+    fn upgrading_to_v9_syncs_only_edited_builtin_profiles() {
+        let path =
+            std::env::temp_dir().join(format!("ft-v9-{}.db", focustrack_sync_proto::new_id()));
+        {
+            // Turn a fresh database back into v8, with Work Mode edited by the user.
+            let conn = open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE focus_runs; DROP TABLE shared_notices; DROP TRIGGER block_profiles_sync_ins; DROP TRIGGER block_profiles_sync_upd;
+                 DROP TRIGGER block_profiles_sync_del; DROP TRIGGER applications_cat_upd;
+                 DROP TRIGGER websites_cat_upd;
+                 DROP INDEX idx_block_profiles_uuid; DROP INDEX idx_block_profiles_pending;
+                 ALTER TABLE block_profiles DROP COLUMN uuid; ALTER TABLE block_profiles DROP COLUMN device_id;
+                 ALTER TABLE block_profiles DROP COLUMN version; ALTER TABLE block_profiles DROP COLUMN synced_version;
+                 ALTER TABLE block_profiles DROP COLUMN hlc;
+                 ALTER TABLE applications DROP COLUMN cat_hlc; ALTER TABLE applications DROP COLUMN cat_version;
+                 ALTER TABLE applications DROP COLUMN cat_synced;
+                 ALTER TABLE websites DROP COLUMN cat_hlc; ALTER TABLE websites DROP COLUMN cat_version;
+                 ALTER TABLE websites DROP COLUMN cat_synced;
+                 UPDATE block_profiles SET sites = '[\"x.com\"]' WHERE name = 'Work Mode';
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let pending: Vec<String> = conn
+            .prepare("SELECT name FROM block_profiles WHERE version > synced_version")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pending, ["Work Mode"]);
+        let id: String = conn
+            .query_row(
+                "SELECT uuid FROM block_profiles WHERE name = 'Study Mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            id,
+            focustrack_sync_proto::name_id("profile", "Study Mode"),
+            "same on every device"
+        );
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -963,7 +1198,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, SCHEMA_VERSION);
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM usage_sessions WHERE uuid IS NOT NULL",
@@ -1017,7 +1252,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, SCHEMA_VERSION);
         let profiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM block_profiles", [], |r| r.get(0))
             .unwrap();

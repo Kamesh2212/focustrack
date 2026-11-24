@@ -27,6 +27,7 @@ mod platform;
 mod popup;
 mod profile;
 mod profiles;
+mod quotes;
 mod sync;
 mod tracker;
 
@@ -125,6 +126,15 @@ fn build_tray(app: &tauri::App, paused: bool) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Administrator mode is on but this copy isn't elevated (e.g. opened from
+    // the Start menu): hand over to the administrator copy. This must happen
+    // before the single-instance check below: otherwise this copy holds it, the
+    // administrator copy thinks FocusTrack is already open and quits, and
+    // nothing opens at all.
+    #[cfg(desktop)]
+    if profile::name().is_none() && admin::hand_over_if_needed() {
+        std::process::exit(0);
+    }
     let mut builder = tauri::Builder::default();
     // A second launch just focuses the running instance (no double tracking).
     // Development profiles run side by side as separate devices instead.
@@ -145,12 +155,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_focustrack_usage::init())
         .setup(|app| {
-            // Administrator mode is on but this copy isn't elevated (e.g. opened
-            // from the Start menu): hand over to the administrator copy.
-            #[cfg(desktop)]
-            if profile::name().is_none() && admin::hand_over_if_needed() {
-                std::process::exit(0);
-            }
             let data_dir = profile::data_dir(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("focustrack.db");
@@ -167,6 +171,7 @@ pub fn run() {
             shared
                 .notifications_enabled
                 .store(settings.notifications_enabled, Ordering::SeqCst);
+            quotes::set_enabled(db::get_setting(&conn, "show_quotes")?.as_deref() != Some("0"));
             shared
                 .break_reminder_mins
                 .store(settings.break_reminder_mins, Ordering::SeqCst);
@@ -217,6 +222,7 @@ pub fn run() {
             commands::get_dashboard,
             commands::get_live_status,
             commands::get_apps,
+            commands::get_devices,
             commands::get_categories,
             commands::set_app_category,
             commands::rename_app,
@@ -231,6 +237,7 @@ pub fn run() {
             commands::delete_all_data,
             commands::delete_data_older_than,
             commands::set_notifications_enabled,
+            commands::set_show_quotes,
             commands::set_break_reminder,
             commands::set_website_tracking,
             commands::send_test_notification,
@@ -283,9 +290,17 @@ pub fn run() {
             commands::sync_remove_device,
             commands::sync_rename_device,
             commands::get_platform,
+            commands::sync_delete_history,
+            commands::sync_delete_account,
+            commands::sync_retention,
+            commands::sync_set_retention,
+            commands::sync_export,
+            commands::sync_device_control,
             commands::get_insets,
             commands::phone_usage_access,
             commands::open_usage_access,
+            commands::phone_blocking,
+            commands::open_phone_blocking,
             commands::import_phone_usage,
         ])
         .run(tauri::generate_context!())

@@ -1,0 +1,53 @@
+# FocusTrack sync server behind HTTPS. Step by step: docs/DEPLOY.md.
+#
+#   Own Caddy (nothing else serves ports 80/443):
+#     docker compose --profile standalone up -d --build
+#   The server's shared Caddy (another project already runs one):
+#     docker compose -f docker-compose.yml -f docker-compose.shared.yml up -d --build sync
+name: focustrack
+
+services:
+  sync:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: focustrack-sync
+    container_name: focustrack-sync
+    restart: unless-stopped
+    environment:
+      FT_SYNC_TRUST_PROXY: "1" # behind Caddy: rate limits see each visitor's address
+      FT_SYNC_QUOTA_MB: ${FT_SYNC_QUOTA_MB:-500}
+      FT_SYNC_MAX_ACCOUNTS: ${FT_SYNC_MAX_ACCOUNTS:-1000}
+    volumes:
+      - sync_data:/data # the database and its daily backups
+    networks:
+      - edge
+    # No published ports: the only way in is Caddy, over HTTPS.
+
+  caddy:
+    profiles: ["standalone"]
+    image: caddy:2-alpine
+    container_name: focustrack-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SYNC_SITE: ${SYNC_SITE:?set SYNC_SITE in .env (the server's host name)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # HTTPS certificates: keep across restarts
+      - caddy_config:/config
+    networks:
+      - edge
+    depends_on:
+      - sync
+
+volumes:
+  sync_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+    name: focustrack_edge

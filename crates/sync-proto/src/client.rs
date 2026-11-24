@@ -180,12 +180,26 @@ impl Client {
         self.get(&path)
     }
 
+    /// Every record in the account, this device's own included (for export).
+    pub fn pull_all(&self, since: i64, limit: usize) -> Result<PullResponse> {
+        self.get(&format!("/v1/sync/pull?since={since}&limit={limit}&own=1"))
+    }
+
     pub fn delete_data(&self, before: &str, device: Option<&str>) -> Result<DeleteDataResponse> {
         let mut path = format!("/v1/data?before={}", urlencode(before));
         if let Some(d) = device {
             path.push_str(&format!("&device={}", urlencode(d)));
         }
         Self::finish(self.req("DELETE", &path).call())
+    }
+
+    pub fn account(&self) -> Result<AccountInfo> {
+        self.get("/v1/account")
+    }
+
+    /// How long the server keeps history (None = forever).
+    pub fn set_retention(&self, days: Option<u32>) -> Result<AccountInfo> {
+        self.send("PUT", "/v1/account/retention", &RetentionRequest { days })
     }
 
     /// Deletes the account and every record. Needs the password (auth key) again.

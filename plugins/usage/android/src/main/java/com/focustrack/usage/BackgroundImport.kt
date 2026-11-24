@@ -33,24 +33,30 @@ class BackgroundImport(ctx: Context, params: WorkerParameters) : Worker(ctx, par
             val request = PeriodicWorkRequestBuilder<BackgroundImport>(15, TimeUnit.MINUTES).build()
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(WORK, ExistingPeriodicWorkPolicy.KEEP, request)
         }
-    }
 
-    override fun doWork(): Result {
-        val ctx = applicationContext
-        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val dir = prefs.getString("dataDir", null) ?: return Result.success() // app never opened
-        if (!UsageReader.granted(ctx)) return Result.success()
-        val now = System.currentTimeMillis()
-        val since = prefs.getLong("since", now - WEEK_MS)
-        return try {
-            System.loadLibrary("focustrack_lib")
-            val out = JSONObject(run(dir, UsageReader.read(ctx, since, now).toString()))
-            if (out.optLong("nextSince", 0) > 0) prefs.edit().putLong("since", out.getLong("nextSince")).apply()
-            Log.i(TAG, "background import: $out")
-            Result.success()
-        } catch (e: Throwable) {
-            Log.w(TAG, "background import failed", e)
-            Result.retry()
+        /**
+         * Imports, syncs and rewrites the blocker's plan now. Also used by the
+         * blocker while the phone is in use. False if it failed (try again later).
+         */
+        @Synchronized
+        fun runNow(ctx: Context): Boolean {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val dir = prefs.getString("dataDir", null) ?: return true // app never opened
+            if (!UsageReader.granted(ctx)) return true
+            val now = System.currentTimeMillis()
+            val since = prefs.getLong("since", now - WEEK_MS)
+            return try {
+                System.loadLibrary("focustrack_lib")
+                val out = JSONObject(run(dir, UsageReader.read(ctx, since, now).toString()))
+                if (out.optLong("nextSince", 0) > 0) prefs.edit().putLong("since", out.getLong("nextSince")).apply()
+                Log.i(TAG, "background import: $out")
+                true
+            } catch (e: Throwable) {
+                Log.w(TAG, "background import failed", e)
+                false
+            }
         }
     }
+
+    override fun doWork(): Result = if (runNow(applicationContext)) Result.success() else Result.retry()
 }

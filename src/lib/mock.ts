@@ -61,9 +61,9 @@ const SITES: [number, string, number, number][] = [
 ];
 
 let limits: LimitStatus[] = [
-  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", key: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, action: "block", enabled: true, usedSecs: 3010, extraSecs: 0, overridesUsed: 0, path: "", scope: null },
-  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", key: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, action: "notify", enabled: true, usedSecs: 1950, extraSecs: 0, overridesUsed: 0, path: "", scope: null },
-  { id: 3, targetType: "app", targetId: 6, name: "Steam", key: "launcher.exe", color: "#8b5cf6", dailyLimitSecs: 2700, warnPct: 80, action: "warn_then_block", enabled: true, usedSecs: 2400, extraSecs: 0, overridesUsed: 0, path: "C:\\Program Files\\HoYoPlay\\launcher.exe", scope: "c:\\program files\\hoyoplay\\" },
+  { id: 1, targetType: "website", targetId: 1, name: "youtube.com", key: "youtube.com", color: "#ef4444", dailyLimitSecs: 3600, warnPct: 80, action: "block", enabled: true, usedSecs: 3010, extraSecs: 0, overridesUsed: 0, path: "", scope: null, reach: "all", othersSecs: 1240 },
+  { id: 2, targetType: "website", targetId: 3, name: "instagram.com", key: "instagram.com", color: "#ec4899", dailyLimitSecs: 1800, warnPct: 80, action: "notify", enabled: true, usedSecs: 1950, extraSecs: 0, overridesUsed: 0, path: "", scope: null, reach: "device", othersSecs: 0 },
+  { id: 3, targetType: "app", targetId: 6, name: "Steam", key: "launcher.exe", color: "#8b5cf6", dailyLimitSecs: 2700, warnPct: 80, action: "warn_then_block", enabled: true, usedSecs: 2400, extraSecs: 0, overridesUsed: 0, path: "C:\\Program Files\\HoYoPlay\\launcher.exe", scope: "c:\\program files\\hoyoplay\\", reach: "device", othersSecs: 0 },
 ];
 let nextLimitId = 4;
 
@@ -85,12 +85,12 @@ const focusHistory = [
 ];
 
 let goals: GoalStatus[] = [
-  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, title: null, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h" },
-  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, title: null, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education" },
-  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, title: null, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m" },
-  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, title: null, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions" },
-  { id: 5, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Read 20 pages", enabled: true, current: 0, state: "in_progress", label: "Read 20 pages" },
-  { id: 6, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Exercise for 30 minutes", enabled: true, current: 1, state: "achieved", label: "Exercise for 30 minutes" },
+  { id: 1, kind: "max_screen", categoryId: null, category: null, color: "#6366f1", target: 6 * 3600, title: null, enabled: true, current: 4 * 3600 + 1200, state: "on_track", label: "Keep screen time under 6h", byDevice: [] },
+  { id: 2, kind: "min_category", categoryId: 2, category: "Education", color: "#0ea5e9", target: 7200, title: null, enabled: true, current: 2700, state: "in_progress", label: "Spend at least 2h on Education", byDevice: [{ id: "d0", name: "This PC", current: 1800 }, { id: "d3", name: "Pixel 8", current: 900 }] },
+  { id: 3, kind: "max_category", categoryId: 6, category: "Social Media", color: "#ec4899", target: 1800, title: null, enabled: true, current: 2400, state: "exceeded", label: "Keep Social Media under 30m", byDevice: [] },
+  { id: 4, kind: "min_focus_sessions", categoryId: null, category: null, color: "#6366f1", target: 3, title: null, enabled: true, current: 1, state: "in_progress", label: "Complete 3 focus sessions", byDevice: [] },
+  { id: 5, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Read 20 pages", enabled: true, current: 0, state: "in_progress", label: "Read 20 pages", byDevice: [] },
+  { id: 6, kind: "custom", categoryId: null, category: null, color: "#6366f1", target: 1, title: "Exercise for 30 minutes", enabled: true, current: 1, state: "achieved", label: "Exercise for 30 minutes", byDevice: [] },
 ];
 let nextGoalId = 7;
 
@@ -134,7 +134,10 @@ let notes: Note[] = [
 ];
 let nextNoteId = 4;
 
+let phoneBlocking = false;
 let phoneAccess = false;
+let retention: number | null = null;
+const mockPaused: Record<string, boolean> = {};
 
 const sync: SyncStatus = {
   signedIn: false,
@@ -163,7 +166,7 @@ function stamp(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function startFocus(plan: FocusPlan): FocusStatus {
+function startFocus(plan: FocusPlan, devices: string[] = []): FocusStatus {
   const start = new Date();
   const end = new Date(start.getTime() + plan.focusMins * 60000);
   focusActive = {
@@ -176,6 +179,7 @@ function startFocus(plan: FocusPlan): FocusStatus {
     preview: plan.profileId != null ? previewFor(plan.profileId) : null,
     endEarly: profiles.find((p) => p.id === plan.profileId)?.endEarly ?? "allow",
     stopWaitSecs: null,
+    run: devices.length ? { id: "run1", joined: false, origin: "This PC", devices } : null,
   };
   return focusActive;
 }
@@ -197,6 +201,7 @@ const settings: Settings = {
   goalReminder: "20:00",
   dashboardLayout: "",
   notificationsEnabled: true,
+  showQuotes: true,
   breakReminderMins: 120,
   websiteTracking: true,
   dataDir: "C:\\Users\\you\\AppData\\Roaming\\com.focustrack.app",
@@ -232,9 +237,14 @@ function appsFor(from: string, to: string): AppUsage[] {
       secs += appSecs(idx, d);
       sessions += 1 + Math.floor(hash(d + name) * 6);
     }
-    return { id, name, exeName, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
+    return { id, name, exeName, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions, members: [id], devices: splitByDevice(secs) };
   });
   return out.sort((a, b) => b.secs - a.secs);
+}
+
+/** Sample: each device's part of a total. */
+function splitByDevice(secs: number) {
+  return DEVICE_SHARES.map(([d, share]) => ({ id: d.id, name: d.name, platform: d.platform, secs: Math.round(secs * share) })).filter((d) => d.secs > 0);
 }
 
 function sitesFor(from: string, to: string): SiteUsage[] {
@@ -248,7 +258,7 @@ function sitesFor(from: string, to: string): SiteUsage[] {
       secs += Math.round(mins * 60 * (0.4 + hash(d + domain) * 1.2) * portion);
       sessions += 2 + Math.floor(hash(domain + d) * 8);
     }
-    return { id, domain, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions };
+    return { id, domain, categoryId, category: cat.name, color: cat.color, kind: cat.kind, secs, sessions, devices: splitByDevice(secs).filter((d) => d.platform !== "android") };
   });
   return out.sort((a, b) => b.secs - a.secs);
 }
@@ -349,7 +359,7 @@ function dashboard(): Omit<Dashboard, "uniqueActiveSecs" | "devices" | "devicesU
   };
 }
 
-function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs"> {
+function report(from: string, to: string): Omit<Report, "uniqueActiveSecs" | "devices" | "devicesUniqueSecs" | "comparison"> {
   const apps = appsFor(from, to);
   const cats = categoriesFor(apps);
   const days = daysFor(from, to);
@@ -437,8 +447,24 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return appsFor(a.from, a.to);
       case "get_categories":
         return CATEGORIES;
-      case "get_report":
-        return withDevices(report(a.from, a.to), a.device);
+      case "get_report": {
+        const r = withDevices(report(a.from, a.to), a.device);
+        return {
+          ...r,
+          comparison: r.devices.map((d, i) => ({
+            ...d,
+            dailyAvgSecs: Math.round(r.dailyAvgSecs * DEVICE_SHARES[i][1]),
+            weekdayAvgSecs: Math.round(r.weekdayAvgSecs * DEVICE_SHARES[i][1]),
+            weekendAvgSecs: Math.round(r.weekendAvgSecs * DEVICE_SHARES[i][1] * (d.platform === "android" ? 1.8 : 0.7)),
+            productiveSecs: Math.round(d.activeSecs * (d.platform === "android" ? 0.15 : 0.6)),
+            distractingSecs: Math.round(d.activeSecs * (d.platform === "android" ? 0.7 : 0.2)),
+            topCategory: d.platform === "android" ? "Social Media" : "Development",
+            topApp: d.platform === "android" ? "Instagram" : "Visual Studio Code",
+          })),
+        };
+      }
+      case "get_devices":
+        return withDevices(report(a.from, a.to)).devices;
       case "get_history":
         return a.kind === "websites" ? siteHistory(a.from, a.to, a.search ?? "") : history(a.from, a.to, a.search ?? "");
       case "get_websites":
@@ -454,8 +480,8 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
           l.targetType === "app"
             ? APPS.find((x) => x[0] === l.targetId)?.[1] ?? "App"
             : SITES.find((x) => x[0] === l.targetId)?.[1] ?? "site";
-        if (existing) Object.assign(existing, l);
-        else limits.push({ ...l, id: nextLimitId++, name, color: "#6366f1", usedSecs: 600 });
+        if (existing) Object.assign(existing, l, l.reach === "all" ? {} : { othersSecs: 0 });
+        else limits.push({ ...l, id: nextLimitId++, name, color: "#6366f1", usedSecs: 600, othersSecs: l.reach === "all" ? 240 : 0 });
         return null;
       }
       case "delete_limit":
@@ -463,6 +489,9 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "set_notifications_enabled":
         settings.notificationsEnabled = a.enabled;
+        return null;
+      case "set_show_quotes":
+        settings.showQuotes = a.enabled;
         return null;
       case "set_break_reminder":
         settings.breakReminderMins = a.mins;
@@ -480,7 +509,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return { active: focusActive, todaySecs: 3000, todaySessions: 1, weekSecs: 6900, weekSessions: 2, streakDays: 2, history: hist, stopPhrase: "I want to stop" };
       }
       case "start_focus":
-        return startFocus(a.plan);
+        return startFocus(a.plan, (a.devices as string[] | undefined) ?? []);
       case "stop_focus": {
         const rule = focusActive?.endEarly ?? "allow";
         if (rule !== "allow" && String(a.phrase ?? "").trim().toLowerCase() !== "i want to stop")
@@ -566,6 +595,11 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
       case "open_usage_access":
         phoneAccess = true;
         return null;
+      case "phone_blocking":
+        return phoneBlocking;
+      case "open_phone_blocking":
+        phoneBlocking = true;
+        return null;
       case "import_phone_usage":
         return phoneAccess ? 3 : null;
       case "sync_status":
@@ -588,12 +622,29 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         return null;
       case "sync_devices":
         return [
-          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), current: true },
-          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), current: false },
+          { id: sync.deviceId, name: sync.deviceName, platform: "windows", appVersion: "1.2.0", lastSeen: new Date().toISOString(), online: true, lastActivity: null, paused: false, syncError: null, syncDisabled: false, current: true },
+          { id: "d2", name: "Study laptop", platform: "windows", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 3600_000).toISOString(), online: false, lastActivity: "2026-11-23 09:41:00", paused: mockPaused.d2 ?? false, syncError: null, syncDisabled: false, current: false },
+          { id: "d3", name: "Pixel 8", platform: "android", appVersion: "1.2.0", lastSeen: new Date(Date.now() - 60_000).toISOString(), online: true, lastActivity: "2026-11-23 10:12:00", paused: mockPaused.d3 ?? false, syncError: "can't reach the sync server: timed out", syncDisabled: false, current: false },
         ];
+      case "sync_device_control":
+        if (a.pauseTracking !== null) mockPaused[String(a.id)] = Boolean(a.pauseTracking);
+        return null;
       case "sync_remove_device":
         sync.otherDevices = 0;
         return null;
+      case "sync_delete_history":
+        return 42;
+      case "sync_delete_account":
+        if (String(a.password).length < 10) throw new Error("Wrong password");
+        Object.assign(sync, { signedIn: false, enabled: false, email: null, state: "off", otherDevices: 0 });
+        return null;
+      case "sync_retention":
+        return retention;
+      case "sync_set_retention":
+        retention = (a.days as number | null) ?? null;
+        return retention;
+      case "sync_export":
+        return "C:/Users/you/Downloads/FocusTrack-export-2026-11-23-1015.json";
       case "sync_rename_device":
         sync.deviceName = String(a.name);
         return null;
@@ -629,7 +680,7 @@ export async function mock<T>(cmd: string, args: Record<string, unknown>): Promi
         const cat = CATEGORIES.find((c) => c.id === g.categoryId) ?? null;
         const base = { ...g, category: cat?.name ?? null, color: cat?.color ?? "#6366f1", label: g.kind === "custom" ? g.title ?? "" : g.title ? `${g.title}` : goalLabel(g.kind, cat?.name ?? null, g.target) };
         if (g.id) goals = goals.map((x) => (x.id === g.id ? { ...x, ...base } : x));
-        else goals.push({ ...base, id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
+        else goals.push({ ...base, byDevice: [], id: nextGoalId++, current: 0, state: g.kind.startsWith("max") ? "on_track" : "in_progress" });
         return null;
       }
       case "delete_goal":

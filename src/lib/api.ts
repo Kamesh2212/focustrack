@@ -19,6 +19,8 @@ import type {
   Notebook,
   Profile,
   Resource,
+  DeviceTotal,
+  LimitReach,
   LimitStatus,
   LiveStatus,
   Report,
@@ -43,7 +45,10 @@ export const api = {
   /** `device`: "all", "desktop", "mobile" or a device id. */
   dashboard: (device = "all") => call<Dashboard>("get_dashboard", { device }),
   liveStatus: () => call<LiveStatus>("get_live_status"),
-  apps: (from: string, to: string) => call<AppUsage[]>("get_apps", { from, to }),
+  /** `combine`: the same app on several platforms is one row, with each device's part. */
+  apps: (from: string, to: string, opts: { combine?: boolean; device?: string } = {}) =>
+    call<AppUsage[]>("get_apps", { from, to, combine: opts.combine ?? false, device: opts.device ?? null }),
+  devices: (from: string, to: string) => call<DeviceTotal[]>("get_devices", { from, to }),
   categories: () => call<Category[]>("get_categories"),
   setAppCategory: (appId: number, categoryId: number | null) =>
     call<void>("set_app_category", { appId, categoryId }),
@@ -53,12 +58,20 @@ export const api = {
     call<SessionRow[]>("get_history", { from, to, search, limit, kind }),
   exportCsv: (from: string, to: string, search: string, kind: HistoryKind) =>
     call<string>("export_csv", { from, to, search, kind }),
-  websites: (from: string, to: string) => call<SiteUsage[]>("get_websites", { from, to }),
+  websites: (from: string, to: string, device?: string) => call<SiteUsage[]>("get_websites", { from, to, device: device ?? null }),
   setWebsiteCategory: (websiteId: number, categoryId: number | null) =>
     call<void>("set_website_category", { websiteId, categoryId }),
   browserStatus: () => call<BrowserStatus>("get_browser_status"),
   limits: () => call<LimitStatus[]>("get_limits"),
-  setLimit: (l: { targetType: "app" | "website"; targetId: number; dailyLimitSecs: number; warnPct: number; action: LimitAction; enabled: boolean }) =>
+  setLimit: (l: {
+    targetType: "app" | "website";
+    targetId: number;
+    dailyLimitSecs: number;
+    warnPct: number;
+    action: LimitAction;
+    enabled: boolean;
+    reach: LimitReach;
+  }) =>
     call<void>("set_limit", l),
   overrideLimit: (id: number) => call<void>("override_limit", { id }),
   setOverridesPerDay: (count: number) => call<void>("set_overrides_per_day", { count }),
@@ -66,13 +79,15 @@ export const api = {
   setDashboardLayout: (layout: string) => call<void>("set_dashboard_layout", { layout }),
   deleteLimit: (id: number) => call<void>("delete_limit", { id }),
   setNotificationsEnabled: (enabled: boolean) => call<void>("set_notifications_enabled", { enabled }),
+  setShowQuotes: (enabled: boolean) => call<void>("set_show_quotes", { enabled }),
   setBreakReminder: (mins: number) => call<void>("set_break_reminder", { mins }),
   setWebsiteTracking: (enabled: boolean) => call<void>("set_website_tracking", { enabled }),
   testNotification: () => call<void>("send_test_notification"),
   installedApps: () => call<InstalledApp[]>("get_installed_apps"),
   ensureApp: (a: InstalledApp) => call<number>("ensure_app", { exeName: a.exeName, name: a.name, path: a.path }),
   focus: (mode?: "focus" | "study") => call<FocusOverview>("get_focus", { mode: mode ?? null }),
-  startFocus: (plan: FocusPlan) => call<FocusStatus>("start_focus", { plan }),
+  /** `devices`: other devices to run it on too (IDs, or "*" for all). */
+  startFocus: (plan: FocusPlan, devices: string[] = []) => call<FocusStatus>("start_focus", { plan, devices }),
   stopFocus: (phrase?: string) => call<void>("stop_focus", { phrase: phrase ?? null }),
   requestStopFocus: () => call<number>("request_stop_focus"),
   previewProfile: (profileId: number) => call<BlockPreview>("preview_profile", { profileId }),
@@ -97,6 +112,9 @@ export const api = {
   platform: () => call<string>("get_platform"),
   insets: () => call<{ top: number; bottom: number }>("get_insets"),
   phoneUsageAccess: () => call<boolean>("phone_usage_access"),
+  /** Phones: whether app blocking is on, and the settings screen to turn it on (#69). */
+  phoneBlocking: () => call<boolean>("phone_blocking"),
+  openPhoneBlocking: () => call<void>("open_phone_blocking"),
   openUsageAccess: () => call<void>("open_usage_access"),
   /** New sessions imported, or null without usage access. */
   importPhoneUsage: () => call<number | null>("import_phone_usage"),
@@ -112,6 +130,16 @@ export const api = {
   syncDevices: () => call<SyncDevice[]>("sync_devices"),
   syncRemoveDevice: (id: string) => call<void>("sync_remove_device", { id }),
   syncRenameDevice: (name: string) => call<void>("sync_rename_device", { name }),
+  /** Deletes synced history everywhere; `before` = "YYYY-MM-DD" or null for all. Returns records removed. */
+  syncDeleteHistory: (before: string | null, device: string | null) => call<number>("sync_delete_history", { before, device }),
+  syncDeleteAccount: (password: string) => call<void>("sync_delete_account", { password }),
+  syncRetention: () => call<number | null>("sync_retention"),
+  syncSetRetention: (days: number | null) => call<number | null>("sync_set_retention", { days }),
+  /** Writes a decrypted JSON export to Downloads; returns its path. */
+  syncExport: () => call<string>("sync_export"),
+  /** Pause tracking / turn sync off on a device (this one or another). */
+  syncDeviceControl: (id: string, pauseTracking: boolean | null, syncEnabled: boolean | null) =>
+    call<void>("sync_device_control", { id, pauseTracking, syncEnabled }),
   toggleGoal: (id: number) => call<boolean>("toggle_goal", { id }),
   goals: () => call<GoalStatus[]>("get_goals"),
   setGoal: (g: { id: number | null; kind: GoalKind; categoryId: number | null; target: number; enabled: boolean; title: string | null }) =>

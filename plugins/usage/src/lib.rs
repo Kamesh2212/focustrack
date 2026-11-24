@@ -48,6 +48,12 @@ struct Granted {
     granted: bool,
 }
 
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct Enabled {
+    enabled: bool,
+}
+
 /// Heights of the system bars (status bar, navigation bar) in CSS pixels.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 pub struct Insets {
@@ -85,6 +91,30 @@ impl<R: Runtime> Usage<R> {
             .map_err(|e| e.to_string());
         #[cfg(not(target_os = "android"))]
         Err("Usage access is only needed on phones".into())
+    }
+
+    /// Whether FocusTrack's app blocker (an accessibility service) is on.
+    pub fn blocking_enabled(&self) -> Result<bool, String> {
+        #[cfg(target_os = "android")]
+        return self
+            .handle
+            .run_mobile_plugin::<Enabled>("blockingStatus", serde_json::json!({}))
+            .map(|e| e.enabled)
+            .map_err(|e| e.to_string());
+        #[cfg(not(target_os = "android"))]
+        Ok(false)
+    }
+
+    /// Opens the system screen where the user turns the blocker on or off.
+    pub fn open_blocking_settings(&self) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        return self
+            .handle
+            .run_mobile_plugin::<serde_json::Value>("openBlockingSettings", serde_json::json!({}))
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        #[cfg(not(target_os = "android"))]
+        Err("App blocking settings are only on phones".into())
     }
 
     /// Tells the background job where the app's data lives and schedules it

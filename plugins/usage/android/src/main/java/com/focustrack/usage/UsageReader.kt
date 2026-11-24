@@ -50,7 +50,7 @@ object UsageReader {
      * The home screen (default launcher): time on it isn't app use. Only the
      * default one: the Settings app also registers a fallback home screen.
      */
-    private fun homeApps(pm: PackageManager): JSONArray {
+    fun homeApps(pm: PackageManager): JSONArray {
         val out = JSONArray()
         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         try {

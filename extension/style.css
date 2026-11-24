@@ -188,6 +188,25 @@ h2 {
 .blocked p {
   color: var(--muted);
 }
+.blocked .quote {
+  margin: 28px 0 0;
+  padding: 16px 18px;
+  border-left: 3px solid var(--accent);
+  background: var(--card);
+  border-radius: 8px;
+  text-align: left;
+}
+.blocked .quote blockquote {
+  margin: 0;
+  font-size: 15px;
+  font-style: italic;
+  color: var(--fg);
+}
+.blocked .quote figcaption {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
 
 /* side panel */
 .panel {

@@ -90,6 +90,7 @@ items on a day, but not what they were.
 | `focus_run` | shared | an active cross-device focus session: plan, start, end, participating devices (#71) | LWW |
 | `limit_extension` | shared | limit id, day, extra seconds (#70) | LWW |
 | `device_control` | shared | target device, pause tracking, sync on/off (#66) — the target device applies it | LWW |
+| `notice` | shared | "this notification was shown today" (goal achieved or missed, evening reminder): key, day — so one device shows it (#72) | LWW |
 | `purge` | shared | "delete history before day X" (optionally for one device) — every device deletes its local copies (#67) | append-only |
 
 Usage spans stay open while an app is in front. The device pushes the open span with its current end every

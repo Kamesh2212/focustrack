@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { useLoad, useNow } from "../lib/hooks";
 import { clock, fmtDuration } from "../lib/format";
 import type { BlockPreview, EndEarly, FocusPlan, FocusStatus, Profile } from "../lib/types";
-import { Button, Card, Empty, ErrorNote, Toggle, cx } from "./ui";
+import { Button, Card, Empty, ErrorNote, Segmented, Toggle, cx } from "./ui";
 import { startSessionMusic } from "./FocusMusic";
 import { music } from "../lib/music";
 
@@ -131,6 +131,13 @@ export function SessionStarter({
   const [preview, setPreview] = useState<BlockPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  // Other devices to run the session on (#71): only offered when signed in to sync.
+  const sync = useLoad(() => api.syncStatus(), []);
+  const signedIn = Boolean(sync.data?.signedIn);
+  const devices = useLoad(() => (signedIn ? api.syncDevices() : Promise.resolve([])), [signedIn]);
+  const others = (devices.data ?? []).filter((d) => !d.current);
+  const [runOn, setRunOn] = useState<"here" | "all" | "some">("here");
+  const [picked, setPicked] = useState<string[]>([]);
 
   // Pick the default profile once profiles load.
   useEffect(() => {
@@ -156,7 +163,9 @@ export function SessionStarter({
     setStarting(true);
     try {
       const label = mode === "study" ? (plan.subject?.trim() || "Study") : plan.label;
-      await api.startFocus({ ...plan, label, profileId: plan.profileId && plan.profileId > 0 ? plan.profileId : null });
+      const also = runOn === "all" ? ["*"] : runOn === "some" ? picked : [];
+      if (runOn === "some" && also.length === 0) throw new Error("Choose at least one other device, or run it on this device only.");
+      await api.startFocus({ ...plan, label, profileId: plan.profileId && plan.profileId > 0 ? plan.profileId : null }, also);
       // Started from a click, so the browser engine lets the music play.
       startSessionMusic();
       onStarted();
@@ -261,6 +270,41 @@ export function SessionStarter({
         </label>
       </div>
 
+      {signedIn && others.length > 0 && (
+        <div className="mt-4 text-sm">
+          <span className="mb-1 block text-slate-500">Run on</span>
+          <Segmented<"here" | "all" | "some">
+            value={runOn}
+            onChange={setRunOn}
+            options={[
+              { value: "here", label: "This device" },
+              { value: "all", label: "All my devices" },
+              { value: "some", label: "Choose…" },
+            ]}
+          />
+          {runOn === "some" && (
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              {others.map((d) => (
+                <label key={d.id} className="flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={picked.includes(d.id)}
+                    onChange={(e) => setPicked(e.target.checked ? [...picked, d.id] : picked.filter((x) => x !== d.id))}
+                  />
+                  {d.name}
+                </label>
+              ))}
+            </div>
+          )}
+          {runOn !== "here" && (
+            <p className="mt-1 text-xs text-slate-500">
+              The other devices join at their next sync (usually within a minute) and use the same blocking profile.
+              Ending the session on any of them ends it everywhere.
+            </p>
+          )}
+        </div>
+      )}
+
       {profile && (
         <div className="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
           <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-medium">
@@ -358,6 +402,12 @@ export function ActiveSession({ f, stopPhrase, onChange }: { f: FocusStatus; sto
           <div className="font-medium">{f.subject || f.label}</div>
           {f.goalText && <div className="text-sm text-slate-600 dark:text-slate-300">Goal: {f.goalText}</div>}
           <div className="text-xs text-slate-500">Session ends at {clock(f.planEndsAt)}</div>
+          {f.run && (
+            <div className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">
+              {f.run.joined ? `Started on ${f.run.origin}` : f.run.devices.includes("*") ? "Running on all your devices" : `Running on ${f.run.devices.length + 1} devices`}
+              {" · ending it here ends it everywhere"}
+            </div>
+          )}
         </div>
 
         <div className="mt-4 w-full max-w-xs">

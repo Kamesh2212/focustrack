@@ -29,6 +29,20 @@ pub struct AppUsage {
     pub kind: String,
     pub secs: i64,
     pub sessions: i64,
+    /// The app rows this row adds up (several when the same app is on
+    /// several platforms, #63).
+    pub members: Vec<i64>,
+    /// Each device's part, with more than one device (#63).
+    pub devices: Vec<DeviceSecs>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceSecs {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub secs: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +164,8 @@ pub fn app_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Ve
             kind: r.get(6)?,
             secs: r.get(7)?,
             sessions: r.get(8)?,
+            members: vec![r.get(0)?],
+            devices: Vec::new(),
         })
     })?;
     let out = rows.collect();
@@ -306,6 +322,8 @@ pub struct SiteUsage {
     pub kind: String,
     pub secs: i64,
     pub sessions: i64,
+    /// Each device's part, with more than one device (#63).
+    pub devices: Vec<DeviceSecs>,
 }
 
 /// Every known website with its usage in the range (unused sites get 0).
@@ -331,10 +349,211 @@ pub fn site_usage(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<V
             kind: r.get(5)?,
             secs: r.get(6)?,
             sessions: r.get(7)?,
+            devices: Vec::new(),
         })
     })?;
     let out = rows.collect();
     out
+}
+
+/// Seconds per row (app or website) and device in the range; respects the device view.
+fn per_device(
+    conn: &Connection,
+    table: &str,
+    col: &str,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<HashMap<i64, Vec<(String, i64)>>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {col}, device_id, SUM(duration_secs) FROM {table}
+         WHERE day BETWEEN ?1 AND ?2 AND device_id IS NOT NULL AND {}
+         GROUP BY {col}, device_id",
+        in_view("device_id")
+    ))?;
+    let mut out: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
+    for row in stmt.query_map(params![from, to], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })? {
+        let (id, dev, secs) = row?;
+        out.entry(id).or_default().push((dev, secs));
+    }
+    Ok(out)
+}
+
+/// Adds `parts` into `into`, by device, keeping the biggest first.
+fn add_parts(
+    into: &mut Vec<DeviceSecs>,
+    parts: &[(String, i64)],
+    names: &HashMap<String, (String, String)>,
+) {
+    for (dev, secs) in parts {
+        match into.iter_mut().find(|d| d.id == *dev) {
+            Some(d) => d.secs += secs,
+            None => {
+                let (name, platform) = names
+                    .get(dev)
+                    .cloned()
+                    .unwrap_or_else(|| ("Other device".into(), String::new()));
+                into.push(DeviceSecs {
+                    id: dev.clone(),
+                    name,
+                    platform,
+                    secs: *secs,
+                });
+            }
+        }
+    }
+    into.sort_by(|a, b| b.secs.cmp(&a.secs).then(a.name.cmp(&b.name)));
+}
+
+fn device_names(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<HashMap<String, (String, String)>> {
+    Ok(device_totals(conn, from, to)?
+        .into_iter()
+        .map(|d| (d.id, (d.name, d.platform)))
+        .collect())
+}
+
+/// Across devices (#63): the same app on Windows, Android and iOS becomes one
+/// row (Chrome = chrome.exe + com.android.chrome), and every row says how much
+/// time each device had. Apps without a known match stay as they are.
+pub fn combine_apps(
+    conn: &Connection,
+    apps: Vec<AppUsage>,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<AppUsage>> {
+    let names = device_names(conn, from, to)?;
+    let parts = per_device(conn, "usage_sessions", "app_id", from, to)?;
+    let mut out: Vec<AppUsage> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    // Most-used first, so a group takes its name, category and ID from its biggest member.
+    for a in apps {
+        let family = crate::categories::app_family(&a.exe_name);
+        let key = family.map_or_else(|| format!("app:{}", a.id), |f| format!("family:{f}"));
+        let own = parts.get(&a.id).cloned().unwrap_or_default();
+        match index.get(&key) {
+            Some(&i) => {
+                let g = &mut out[i];
+                g.secs += a.secs;
+                g.sessions += a.sessions;
+                g.members.push(a.id);
+                if let Some(f) = family {
+                    g.name = f.to_string();
+                }
+                add_parts(&mut g.devices, &own, &names);
+            }
+            None => {
+                let mut g = a;
+                g.devices.clear();
+                add_parts(&mut g.devices, &own, &names);
+                index.insert(key, out.len());
+                out.push(g);
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        b.secs
+            .cmp(&a.secs)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+/// Every website row with each device's part (#63).
+pub fn sites_by_device(
+    conn: &Connection,
+    mut sites: Vec<SiteUsage>,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<SiteUsage>> {
+    let names = device_names(conn, from, to)?;
+    let parts = per_device(conn, "website_sessions", "website_id", from, to)?;
+    for s in &mut sites {
+        if let Some(p) = parts.get(&s.id) {
+            add_parts(&mut s.devices, p, &names);
+        }
+    }
+    Ok(sites)
+}
+
+/// One device compared with the others (#65).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStats {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub current: bool,
+    pub active_secs: i64,
+    pub idle_secs: i64,
+    pub daily_avg_secs: i64,
+    pub weekday_avg_secs: i64,
+    pub weekend_avg_secs: i64,
+    pub productive_secs: i64,
+    pub distracting_secs: i64,
+    pub top_category: Option<String>,
+    pub top_app: Option<String>,
+    pub last_activity: Option<String>,
+}
+
+/// Each device's numbers for the range, most-used first (#65). Sets and clears
+/// the device view itself, so call it before setting a view of your own.
+pub fn compare_devices(
+    conn: &Connection,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> rusqlite::Result<Vec<DeviceStats>> {
+    let (f, t) = (fmt_day(from), fmt_day(to));
+    let mut out = Vec::new();
+    for d in device_totals(conn, &f, &t)? {
+        if d.active_secs == 0 && d.idle_secs == 0 {
+            continue;
+        }
+        let _view = crate::db::device_view(conn, Some(std::slice::from_ref(&d.id)))?;
+        let days = daily_totals(conn, from, to)?;
+        let weekend = |x: &DayTotal| {
+            parse_day(&x.day)
+                .is_ok_and(|d| matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun))
+        };
+        let (we, wd): (Vec<DayTotal>, Vec<DayTotal>) = days.iter().cloned().partition(weekend);
+        let cats = category_usage(conn, &f, &t)?;
+        let (productive, distracting) = productive_split(&cats);
+        let top_category = cats
+            .iter()
+            .filter(|c| c.secs > 0)
+            .max_by_key(|c| c.secs)
+            .map(|c| c.name.clone());
+        let top_app = app_usage(conn, &f, &t)?
+            .into_iter()
+            .find(|a| a.secs > 0)
+            .map(|a| a.name);
+        out.push(DeviceStats {
+            daily_avg_secs: average_of_active_days(&days),
+            weekday_avg_secs: average_of_active_days(&wd),
+            weekend_avg_secs: average_of_active_days(&we),
+            productive_secs: productive,
+            distracting_secs: distracting,
+            top_category,
+            top_app,
+            id: d.id,
+            name: d.name,
+            platform: d.platform,
+            current: d.current,
+            active_secs: d.active_secs,
+            idle_secs: d.idle_secs,
+            last_activity: d.last_activity,
+        });
+    }
+    out.sort_by_key(|d| std::cmp::Reverse(d.active_secs));
+    Ok(out)
 }
 
 pub fn site_total(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<i64> {

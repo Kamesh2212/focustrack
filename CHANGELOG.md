@@ -4,6 +4,72 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+## [1.2.2] - 2026-11-24
+
+Pre-release for testing; everything in 1.2.1, plus:
+
+### Fixed
+- With Administrator mode on, opening FocusTrack from the Start menu or a shortcut did nothing: the normal copy
+  and the administrator copy each thought the other was FocusTrack and both quit. The hand-over now happens first.
+
+## [1.2.1] - 2026-11-24
+
+Pre-release for testing. Multi-device sync and the Android app are **previews**. Sync now uses FocusTrack's
+hosted server (https://sync.140-238-91-202.sslip.io) by default; see [docs/SYNC-SETUP.md](docs/SYNC-SETUP.md).
+**Before installing**, back up your data (close FocusTrack and copy its data folder, shown in Settings): the database
+is upgraded to a new version on first start. Devices signed in to a server on your PC need to sign out and sign
+in again to use the hosted server.
+
+### Added
+- **Hosted sync server**: the apps now sync through FocusTrack's server at https://sync.140-238-91-202.sslip.io
+  by default (you can still enter your own). Deployed with Docker and Caddy (HTTPS), with daily backups; see
+  [docs/DEPLOY.md](docs/DEPLOY.md).
+- Sync server: per-account storage quota (`FT_SYNC_QUOTA_MB`, default 500), a cap on accounts
+  (`FT_SYNC_MAX_ACCOUNTS`, default 1000), rate limits also on token refresh, password change and account
+  deletion, and `focustrack-server backup <file>`.
+- **Your synced data** (Settings → Account & Sync, #67): export everything in your account as decrypted JSON;
+  choose how long the server keeps history (30 days to 2 years, or forever); delete synced history (everything
+  or older than a period) from the server and all your devices; delete one device's history; delete the
+  account (asks for your password).
+- Sync server: retention periods, applied hourly, and an export option to download your own records.
+- **Device management** (#66): each device shows whether it's online, when it last synced, its last activity,
+  whether tracking is paused and any sync problem. Pause or resume tracking on another device, or turn its sync
+  off, from this one; it applies at that device's next sync. Database schema v7.
+- **Limits across devices** (#70): a limit can count usage on all your synced devices instead of just this
+  one; a website limit then also counts the site's phone app (youtube.com counts the YouTube app). The limits
+  list shows how much came from other devices. Other devices' time arrives when they sync, so blocking can lag
+  by a few minutes. Database schema v8.
+- **Blocking profiles and categories sync** (#62): profiles you create, edit or delete, and the category you
+  pick for an app or website, now sync to all your devices. If two devices edit the same profile while
+  offline, the later edit wins; two new profiles with the same name are both kept. Database schema v9.
+- **Focus sessions across devices** (#71): when starting a focus or study session, choose to run it on this
+  device, all your devices, or ones you pick. The other devices join at their next sync (devices sync every
+  15 seconds while such a session runs), show the same timer and apply the same blocking profile. Ending it on
+  any device, following the profile's rules, ends it everywhere. The session is recorded once, on the device
+  that started it. Database schema v10.
+- **Goals across devices** (#72): goal progress counts every synced device, and with more than one device
+  each goal shows how much came from each. "Goal achieved", "goal missed" and the evening reminder appear on
+  one device only. Changing a goal lets it notify again. Database schema v11.
+- **App blocking on Android** (#69): limits and focus sessions now block apps on the phone, with FocusTrack's
+  block screen and "+15 min" like on a computer, also while FocusTrack is closed. It uses an accessibility
+  service that only learns which app is open; FocusTrack explains this and asks before you turn it on
+  (Settings → App blocking on this phone). The phone app, emergency calls and Settings are never blocked.
+- **The same app across devices** (#63): with several devices, Chrome on your computers and Chrome on your
+  phone add up to one Chrome total (about 25 common apps are matched across Windows, Android and iOS; others
+  stay per platform). Applications and Websites get the device filter and show each device's part.
+- **Compare devices** (#65): Reports shows your devices side by side: total, daily average, weekdays vs
+  weekends, productive vs distracting time and what each is mostly used for, plus computers vs phones and
+  the most-used device. Select one for its full report.
+- **Motivational quotes** (#49, #50): the blocked-website page shows a short quote from history about focus,
+  hard work, patience or not giving up, and blocked-app notifications add one when it fits. Never the same one
+  twice in a row; turn them off under Settings → Show motivational quotes. The first 25 quotes, each with a
+  checked source, are in `quotes/quotes.json` (built into the app; the extension gets its quote from the app).
+
+### Security
+- Sync server: behind a proxy, rate limits use the address the proxy saw, not one the client could make up.
+
 ## [1.2.0] - 2026-11-19
 
 Pre-release for testing. Multi-device sync and the Android app are **previews**: sync needs a FocusTrack sync
@@ -93,6 +159,8 @@ First public release.
 ### Known issues
 - See [docs/AUDIT-1.0.0.md](docs/AUDIT-1.0.0.md) and the issue tracker.
 
+[1.2.2]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.2
+[1.2.1]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.0.0

@@ -19,4 +19,32 @@
             <category android:name="android.intent.category.HOME" />
         </intent>
     </queries>
+
+    <application>
+        <!-- Blocking (#69): Android tells this service which app comes to the
+             front (package name only, never window contents); FocusTrack then
+             shows its block screen over apps that are over their limit or blocked
+             by a focus session. Off until the user turns it on after FocusTrack's
+             explanation (Settings > Accessibility). -->
+        <service
+            android:name="com.focustrack.usage.BlockerService"
+            android:exported="true"
+            android:label="@string/focustrack_blocker_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/focustrack_blocker" />
+        </service>
+
+        <activity
+            android:name="com.focustrack.usage.BlockActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.focustrack.blocker"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+    </application>
 </manifest>

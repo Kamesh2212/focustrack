@@ -89,6 +89,13 @@ pub fn open(path: &str) -> rusqlite::Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_records_seq ON records(account, seq);
          CREATE INDEX IF NOT EXISTS idx_records_day ON records(account, day);",
     )?;
+    // Added after the first release: how long to keep history (#67).
+    let has_retention: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('accounts') WHERE name = 'retention_days'")?
+        .exists([])?;
+    if !has_retention {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN retention_days INTEGER;")?;
+    }
     Ok(conn)
 }
 
@@ -363,14 +370,26 @@ pub fn delete_account(conn: &Connection, account: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-/// Stores a batch of records for `device` (design §6.2). Idempotent.
+/// How many accounts the server has.
+pub fn account_count(conn: &mut Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+}
+
+/// Stores a batch of records for `device` (design §6.2). Idempotent. A record
+/// that would take the account past `quota` bytes is rejected.
 pub fn push(
     conn: &mut Connection,
     account: &str,
     device: &str,
     records: &[Envelope],
+    quota: i64,
 ) -> rusqlite::Result<(Vec<Ack>, Vec<Rejected>)> {
     let tx = conn.transaction()?;
+    let mut used: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(length(payload)), 0) FROM records WHERE account = ?1",
+        params![account],
+        |r| r.get(0),
+    )?;
     let mut acked = Vec::new();
     let mut rejected = Vec::new();
     for env in records {
@@ -388,14 +407,14 @@ pub fn push(
             continue;
         }
         let shared = kind::is_shared(&env.kind);
-        let existing: Option<(String, String, i64, Option<String>)> = tx
+        let existing: Option<(String, String, i64, Option<String>, i64)> = tx
             .query_row(
-                "SELECT kind, device, version, hlc FROM records WHERE account = ?1 AND id = ?2",
+                "SELECT kind, device, version, hlc, length(payload) FROM records WHERE account = ?1 AND id = ?2",
                 params![account, env.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        if let Some((k, owner, version, hlc_old)) = &existing {
+        if let Some((k, owner, version, hlc_old, _)) = &existing {
             if *k != env.kind {
                 rejected.push(reject("record kind can't change"));
                 continue;
@@ -421,6 +440,12 @@ pub fn push(
                 continue;
             }
         }
+        let grow = env.payload.len() as i64 - existing.as_ref().map_or(0, |e| e.4);
+        if grow > 0 && used + grow > quota {
+            rejected.push(reject("storage quota reached"));
+            continue;
+        }
+        used += grow;
         let seq: i64 = tx.query_row(
             "UPDATE accounts SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
             params![account],
@@ -507,6 +532,40 @@ pub fn pull(
         )?
     };
     Ok((out, cursor.max(since), more))
+}
+
+/// How many days of history the account keeps (None = forever).
+pub fn retention(conn: &Connection, account: &str) -> rusqlite::Result<Option<u32>> {
+    conn.query_row(
+        "SELECT retention_days FROM accounts WHERE id = ?1",
+        params![account],
+        |r| r.get(0),
+    )
+}
+
+pub fn set_retention(conn: &Connection, account: &str, days: Option<u32>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET retention_days = ?2 WHERE id = ?1",
+        params![account, days],
+    )?;
+    Ok(())
+}
+
+/// Deletes history older than each account's retention period. Returns the
+/// number of records removed. `today` is `YYYY-MM-DD`.
+pub fn apply_retention(conn: &Connection, today: chrono::NaiveDate) -> rusqlite::Result<u64> {
+    let accounts: Vec<(String, u32)> = conn
+        .prepare("SELECT id, retention_days FROM accounts WHERE retention_days IS NOT NULL")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    for (account, days) in accounts {
+        let cutoff = (today - chrono::Duration::days(days as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+        n += delete_before(conn, &account, &cutoff, None)?;
+    }
+    Ok(n)
 }
 
 /// Deletes device-owned history before `before` (shared definitions stay).

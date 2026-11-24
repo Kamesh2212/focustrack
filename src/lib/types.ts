@@ -29,6 +29,17 @@ export interface AppUsage {
   kind: CategoryKind;
   secs: number;
   sessions: number;
+  /** App rows this row adds up (several: the same app on several platforms). */
+  members: number[];
+  /** Each device's part, with more than one device. */
+  devices: DeviceSecs[];
+}
+
+export interface DeviceSecs {
+  id: string;
+  name: string;
+  platform: string;
+  secs: number;
 }
 
 export interface SiteUsage {
@@ -40,6 +51,7 @@ export interface SiteUsage {
   kind: CategoryKind;
   secs: number;
   sessions: number;
+  devices: DeviceSecs[];
 }
 
 export type LimitAction = "notify" | "block" | "warn_then_block";
@@ -62,7 +74,13 @@ export interface LimitStatus {
   path: string;
   /** Launcher limits: the folder whose programs this limit also covers. */
   scope: string | null;
+  /** "device": this device's usage counts; "all": every synced device's. */
+  reach: LimitReach;
+  /** With reach "all": the part of usedSecs from other devices. */
+  othersSecs: number;
 }
+
+export type LimitReach = "device" | "all";
 
 export interface BrowserStatus {
   serverRunning: boolean;
@@ -145,6 +163,25 @@ export interface Report {
   uniqueActiveSecs: number;
   devices: DeviceTotal[];
   devicesUniqueSecs: number;
+  /** With several devices: each one's numbers side by side. */
+  comparison: DeviceStats[];
+}
+
+export interface DeviceStats {
+  id: string;
+  name: string;
+  platform: string;
+  current: boolean;
+  activeSecs: number;
+  idleSecs: number;
+  dailyAvgSecs: number;
+  weekdayAvgSecs: number;
+  weekendAvgSecs: number;
+  productiveSecs: number;
+  distractingSecs: number;
+  topCategory: string | null;
+  topApp: string | null;
+  lastActivity: string | null;
 }
 
 export interface SessionRow {
@@ -168,6 +205,8 @@ export interface Settings {
   theme: Theme;
   dataDir: string;
   notificationsEnabled: boolean;
+  /** A motivational quote when something is blocked. */
+  showQuotes: boolean;
   breakReminderMins: number;
   websiteTracking: boolean;
   overridesPerDay: number;
@@ -195,7 +234,14 @@ export interface SyncDevice {
   name: string;
   platform: string;
   appVersion: string;
+  /** Last time it talked to the server (≈ last sync). */
   lastSeen: string | null;
+  online: boolean;
+  lastActivity: string | null;
+  paused: boolean;
+  syncError: string | null;
+  /** Sync was turned off for it from another device. */
+  syncDisabled: boolean;
   current: boolean;
 }
 
@@ -250,6 +296,18 @@ export interface FocusStatus {
   endEarly: EndEarly;
   stopWaitSecs: number | null;
   plan: FocusPlan;
+  /** Running on several devices. */
+  run: FocusRun | null;
+}
+
+export interface FocusRun {
+  id: string;
+  /** Started on another device (which keeps it in the history). */
+  joined: boolean;
+  /** Name of the device that started it. */
+  origin: string;
+  /** Device IDs taking part; "*" = all. */
+  devices: string[];
 }
 
 export interface FocusRecord {
@@ -292,6 +350,8 @@ export interface GoalStatus {
   current: number;
   state: "achieved" | "in_progress" | "on_track" | "exceeded";
   label: string;
+  /** With several synced devices: each device's part of `current`. */
+  byDevice: { id: string; name: string; current: number }[];
 }
 
 export interface Insight {

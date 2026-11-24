@@ -134,3 +134,19 @@ pub struct PullResponse {
 pub struct DeleteDataResponse {
     pub deleted: u64,
 }
+
+/// `GET /v1/account`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountInfo {
+    /// Days of history the server keeps; None = forever.
+    pub retention_days: Option<u32>,
+}
+
+/// `PUT /v1/account/retention`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionRequest {
+    pub days: Option<u32>,
+}
+
+/// Retention periods a client may choose (days).
+pub const RETENTION_CHOICES: &[u32] = &[30, 90, 180, 365, 730];

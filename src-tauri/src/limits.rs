@@ -51,6 +51,10 @@ pub struct LimitStatus {
     pub path: String,
     /// Launcher limits: the folder whose programs this limit also covers.
     pub scope: Option<String>,
+    /// `device`: this device's usage counts; `all`: every synced device's (#70).
+    pub reach: String,
+    /// With `all`: the part of `used_secs` that came from other devices.
+    pub others_secs: i64,
 }
 
 impl LimitStatus {
@@ -106,17 +110,7 @@ fn limit_status_days(
                 COALESCE(a.exe_name, w.domain, ''),
                 COALESCE(ca.color, cw.color, '#94a3b8'),
                 l.daily_limit_secs, l.warn_pct, l.action, l.enabled,
-                CASE l.target_type
-                  WHEN 'app' THEN (SELECT COALESCE(SUM(duration_secs), 0) FROM usage_sessions
-                                   WHERE app_id = l.target_id AND day IN (?1, ?2)
-                                     AND device_id = (SELECT value FROM user_settings WHERE key = 'device_id'))
-                  -- A limit on youtube.com also counts m.youtube.com (#8).
-                  ELSE (SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
-                        JOIN websites w2 ON w2.id = s.website_id
-                        WHERE s.day IN (?1, ?2) AND s.device_id = (SELECT value FROM user_settings WHERE key = 'device_id')
-                          AND (w2.domain = w.domain OR w2.domain LIKE '%.' || w.domain))
-                END,
-                COALESCE(o.extra_secs, 0), COALESCE(o.count, 0), COALESCE(a.exe_path, '')
+                COALESCE(o.extra_secs, 0), COALESCE(o.count, 0), COALESCE(a.exe_path, ''), l.reach
          FROM usage_limits l
          LEFT JOIN applications a ON l.target_type = 'app' AND a.id = l.target_id
          LEFT JOIN categories ca ON ca.id = a.category_id
@@ -125,7 +119,7 @@ fn limit_status_days(
          LEFT JOIN limit_overrides o ON o.limit_id = l.id AND o.day = ?1
          ORDER BY l.id",
     )?;
-    let rows = stmt.query_map(params![day, also], |r| {
+    let rows = stmt.query_map(params![day], |r| {
         Ok(LimitStatus {
             id: r.get(0)?,
             target_type: r.get(1)?,
@@ -137,30 +131,77 @@ fn limit_status_days(
             warn_pct: r.get(7)?,
             action: r.get(8)?,
             enabled: r.get::<_, i64>(9)? != 0,
-            used_secs: r.get(10)?,
-            extra_secs: r.get(11)?,
-            overrides_used: r.get(12)?,
-            path: r.get(13)?,
+            used_secs: 0,
+            extra_secs: r.get(10)?,
+            overrides_used: r.get(11)?,
+            path: r.get(12)?,
             scope: None,
+            reach: r.get(13)?,
+            others_secs: 0,
         })
     })?;
     let mut out: Vec<LimitStatus> = rows.collect::<Result<_, _>>()?;
-    // Launcher limits also count every program installed under the launcher's
-    // folder (HoYoPlay's launcher.exe → GenshinImpact.exe) (#5).
-    for l in out.iter_mut().filter(|l| l.target_type == "app") {
-        l.scope = crate::identity::scope_dir(&l.key, &l.path);
-        if let Some(scope) = &l.scope {
-            l.used_secs = conn.query_row(
+    for l in &mut out {
+        // Launcher limits also count every program installed under the
+        // launcher's folder (HoYoPlay's launcher.exe → GenshinImpact.exe) (#5).
+        if l.target_type == "app" {
+            l.scope = crate::identity::scope_dir(&l.key, &l.path);
+        }
+        let all = l.reach == "all";
+        l.used_secs = used_secs(conn, l, day, also, all)?;
+        if all {
+            l.others_secs = l.used_secs - used_secs(conn, l, day, also, false)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Seconds counted toward a limit today: this device's usage, or every
+/// synced device's (`all`, #70).
+fn used_secs(
+    conn: &Connection,
+    l: &LimitStatus,
+    day: &str,
+    also: &str,
+    all: bool,
+) -> rusqlite::Result<i64> {
+    let own = "(SELECT value FROM user_settings WHERE key = 'device_id')";
+    if l.target_type == "app" {
+        return conn.query_row(
+            &format!(
                 "SELECT COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
                  JOIN applications a ON a.id = s.app_id
-                 WHERE s.day IN (?1, ?4) AND s.device_id = (SELECT value FROM user_settings WHERE key = 'device_id')
-                   AND (s.app_id = ?2 OR instr(lower(COALESCE(a.exe_path, '')), ?3) = 1)",
-                params![day, l.target_id, scope, also],
+                 WHERE s.day IN (?1, ?2) AND (?5 OR s.device_id = {own})
+                   AND (s.app_id = ?3 OR (?4 IS NOT NULL AND instr(lower(COALESCE(a.exe_path, '')), ?4) = 1))"
+            ),
+            params![day, also, l.target_id, l.scope, all],
+            |r| r.get(0),
+        );
+    }
+    // A limit on youtube.com also counts m.youtube.com (#8).
+    let mut secs: i64 = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(s.duration_secs), 0) FROM website_sessions s
+             JOIN websites w ON w.id = s.website_id
+             WHERE s.day IN (?1, ?2) AND (?4 OR s.device_id = {own})
+               AND (w.domain = ?3 OR w.domain LIKE '%.' || ?3)"
+        ),
+        params![day, also, l.key, all],
+        |r| r.get(0),
+    )?;
+    // Across devices, the site's phone app counts too (the YouTube app for youtube.com).
+    if all {
+        for pkg in crate::categories::apps_for_site(&l.key) {
+            secs += conn.query_row::<i64, _, _>(
+                "SELECT COALESCE(SUM(s.duration_secs), 0) FROM usage_sessions s
+                 JOIN applications a ON a.id = s.app_id
+                 WHERE s.day IN (?1, ?2) AND lower(a.exe_name) = ?3",
+                params![day, also, pkg],
                 |r| r.get(0),
             )?;
         }
     }
-    Ok(out)
+    Ok(secs)
 }
 
 /// Extends a limit by 15 minutes for today, if overrides remain.
@@ -427,14 +468,25 @@ fn check(
         }
         return Ok(());
     }
+    // Goal notifications go to one device only, whichever gets there first (#72).
     let goals = crate::goals::goal_status(conn, &day)?;
+    let mut once: Vec<(Notice, String)> = Vec::new();
     for g in &goals {
         if let Some((key, title, body)) = crate::goals::goal_notice(g) {
-            notices.push(Notice { key, title, body });
+            let shared = key.replacen(&format!("goal:{}:", g.id), &format!("goal:{}:", g.uuid), 1);
+            once.push((Notice { key, title, body }, shared));
         }
     }
     let settings = db::load_settings(conn)?;
-    notices.extend(goal_reminder(&goals, now, &settings.goal_reminder));
+    if let Some(n) = goal_reminder(&goals, now, &settings.goal_reminder) {
+        let shared = n.key.clone();
+        once.push((n, shared));
+    }
+    for (n, shared) in once {
+        if db::mark_notified_everywhere(conn, &n.key, &shared, &day)? {
+            notify(app, &n.title, &n.body);
+        }
+    }
     // Break reminders are about this computer, not the phone.
     let spans = analytics::own_active_spans(conn, &day, &day)?;
     notices.extend(break_notice(
@@ -520,6 +572,8 @@ mod tests {
             overrides_used: 0,
             path: String::new(),
             scope: None,
+            reach: "device".into(),
+            others_secs: 0,
         }
     }
 
@@ -673,6 +727,8 @@ mod tests {
     #[test]
     fn goal_reminder_lists_pending_goals_after_set_time() {
         let g = |label: &str, state: &str| crate::goals::GoalStatus {
+            uuid: String::new(),
+            by_device: Vec::new(),
             id: 1,
             kind: "custom".into(),
             category_id: None,
