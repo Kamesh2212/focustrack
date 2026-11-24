@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-24
+
+Pre-release for testing. Multi-device sync and the Android app are **previews**. Sync now uses FocusTrack's
+hosted server (https://sync.140-238-91-202.sslip.io) by default; see [docs/SYNC-SETUP.md](docs/SYNC-SETUP.md).
+**Before installing**, back up your data (close FocusTrack and copy its data folder, shown in Settings): the database
+is upgraded to a new version on first start. Devices signed in to a server on your PC need to sign out and sign
+in again to use the hosted server.
+
 ### Added
 - **Hosted sync server**: the apps now sync through FocusTrack's server at https://sync.140-238-91-202.sslip.io
   by default (you can still enter your own). Deployed with Docker and Caddy (HTTPS), with daily backups; see
@@ -143,6 +151,7 @@ First public release.
 ### Known issues
 - See [docs/AUDIT-1.0.0.md](docs/AUDIT-1.0.0.md) and the issue tracker.
 
+[1.2.1]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.0.0

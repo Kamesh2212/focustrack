@@ -46,6 +46,21 @@ that serves other sites from `~/caddy-extra/*.caddy`. To run both:
 Sign-in, sign-up, token refresh, password change and account deletion are limited to 20 per minute per visitor,
 and 5 wrong passwords lock an account for a while. Requests are at most 4 MB.
 
+## Looking at the database
+
+From your PC (Git Bash), read-only:
+
+```sh
+deploy/db.sh            # accounts, devices, records per kind, latest records
+deploy/db.sh watch      # the same, refreshed every 5 seconds while you test the apps
+deploy/db.sh shell      # sqlite3 prompt: .tables, .schema records, SELECT …, .quit
+deploy/db.sh "SELECT kind, COUNT(*) FROM records GROUP BY kind"
+```
+
+Tables: `accounts` (email, key-derivation settings, wrapped key, retention), `devices` (platform, app
+version, last seen), `access_tokens`, `records` (one row per synced item: kind, device, day, version and the
+encrypted `payload`) and `meta`. Payloads are end-to-end encrypted, so you see sizes and counts, not screen time.
+
 ## Everyday commands (on the server)
 
 ```sh
