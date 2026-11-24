@@ -1,6 +1,6 @@
 [package]
 name = "focustrack"
-version = "1.2.1"
+version = "1.2.2"
 description = "FocusTrack - Windows screen time & digital wellbeing"
 edition = "2021"
 

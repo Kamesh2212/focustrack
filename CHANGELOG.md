@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-24
+
+Pre-release for testing; everything in 1.2.1, plus:
+
 ### Fixed
 - With Administrator mode on, opening FocusTrack from the Start menu or a shortcut did nothing: the normal copy
   and the administrator copy each thought the other was FocusTrack and both quit. The hand-over now happens first.
@@ -155,6 +159,7 @@ First public release.
 ### Known issues
 - See [docs/AUDIT-1.0.0.md](docs/AUDIT-1.0.0.md) and the issue tracker.
 
+[1.2.2]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Kamesh2212/focustrack/releases/tag/v1.1.0

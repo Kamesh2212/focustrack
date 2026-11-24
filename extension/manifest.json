@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FocusTrack",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "FocusTrack widgets in your browser's side panel and toolbar, and website tracking for the FocusTrack desktop app (domains only). Your own new tab page stays exactly as it is.",
   "permissions": [
     "tabs",
