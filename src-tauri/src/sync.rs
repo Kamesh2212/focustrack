@@ -2240,6 +2240,19 @@ mod tests {
         Local::now().date_naive().and_hms_opt(h, m, 0).unwrap()
     }
 
+    /// Today's (hour, minute) `mins` minutes ago (00:00 just after midnight),
+    /// for tests that need usage before "now".
+    fn earlier(mins: i64) -> (u32, u32) {
+        use chrono::Timelike;
+        let now = Local::now().naive_local();
+        let t = now - chrono::Duration::minutes(mins);
+        if t.date() < now.date() {
+            (0, 0)
+        } else {
+            (t.hour(), t.minute())
+        }
+    }
+
     impl Device {
         fn sync(&mut self) {
             sync_once(&self.handle, &mut self.conn).unwrap();
@@ -2539,8 +2552,9 @@ mod tests {
     #[test]
     fn deleting_all_history_reaches_every_device() {
         let (mut a, mut b) = pair();
-        a.use_app("code.exe", (9, 0), (9, 30));
-        b.use_app("steam.exe", (9, 0), (9, 10));
+        // Before "now": deleting everything removes what started before now.
+        a.use_app("code.exe", earlier(40), earlier(10));
+        b.use_app("steam.exe", earlier(40), earlier(30));
         a.sync();
         b.sync();
         a.sync();
@@ -2576,8 +2590,9 @@ mod tests {
     #[test]
     fn deleting_one_devices_history_or_older_history() {
         let (mut a, mut b) = pair();
-        a.use_app("code.exe", (9, 0), (9, 30));
-        b.use_app("steam.exe", (9, 0), (9, 10));
+        // Before "now": deleting everything removes what started before now.
+        a.use_app("code.exe", earlier(40), earlier(10));
+        b.use_app("steam.exe", earlier(40), earlier(30));
         a.sync();
         b.sync();
         a.sync();
